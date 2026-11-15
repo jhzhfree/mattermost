@@ -1,0 +1,20 @@
+{
+  "id": "com.aitagent.intake",
+  "name": "AI-TAgent Request Intake",
+  "description": "Local, explicitly authorized human request intake. No task execution or Octop delivery.",
+  "version": "0.1.0",
+  "min_server_version": "12.2.0",
+  "server": {"executables": {"linux-amd64": "server/linux-amd64"}},
+  "settings_schema": {
+    "header": "Disabled by default. Configure a single test team/channel, an existing digital employee Bot, and the humans allowed to submit local requests. These settings grant intake access only, not Octop execution permission. Goals are stored in the plugin KV store for seven days; never submit secrets.",
+    "settings": [
+      {"key": "Enabled", "display_name": "Enable local intake", "type": "bool", "default": false},
+      {"key": "OrganizationID", "display_name": "Octop organization identifier", "type": "text", "default": ""},
+      {"key": "EmployeeID", "display_name": "Digital employee identifier", "type": "text", "default": ""},
+      {"key": "BotUserID", "display_name": "Existing dedicated Bot user ID", "type": "text", "default": ""},
+      {"key": "TeamID", "display_name": "Allowed team ID", "type": "text", "default": ""},
+      {"key": "ChannelID", "display_name": "Allowed channel ID", "type": "text", "default": ""},
+      {"key": "AllowedRequesterIDs", "display_name": "Allowed human user IDs (comma-separated)", "type": "text", "default": ""}
+    ]
+  }
+}
