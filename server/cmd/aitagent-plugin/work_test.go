@@ -37,6 +37,7 @@ func TestLocalReadCancelAndDuplicateLimits(t *testing.T) {
 			// A new process has an independent limiter but the same shared ledger.
 			p = &Plugin{workClock: clock.now}
 			p.SetAPI(f)
+			p.cachedConfig.Store(snapshotFor(f.config))
 			if tc.mode != "request" {
 				args.Command = "/aitagent " + tc.mode + " " + r.ID
 			}

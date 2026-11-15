@@ -291,6 +291,7 @@ func TestStorageGateCorruptionAndClock(t *testing.T) {
 		f.values[ledgerKey] = raw
 		p = &Plugin{}
 		p.SetAPI(f) // independent process for each corrupt-state case
+		p.cachedConfig.Store(snapshotFor(f.config))
 		if text := invoke(t, p, args); !strings.Contains(text, "unavailable") || f.writes != 0 {
 			t.Fatal("unsafe recovery", text)
 		}

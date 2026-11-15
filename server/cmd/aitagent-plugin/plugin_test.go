@@ -94,6 +94,7 @@ func fixture() (*Plugin, *fakeAPI, *model.CommandArgs) {
 	}
 	p := &Plugin{}
 	p.SetAPI(f)
+	p.cachedConfig.Store(snapshotFor(f.config)) // simulate successful activation for command tests
 	return p, f, &model.CommandArgs{UserId: user, TeamId: team, ChannelId: channel, TriggerId: "server-generated-trigger", Command: "/aitagent request Inspect service health"}
 }
 
@@ -225,6 +226,7 @@ func TestConcurrentDispatchReplayCreatesOneReceipt(t *testing.T) {
 	// Continue on a fresh process so the shared replay check, not the new local limiter, is exercised.
 	p = &Plugin{}
 	p.SetAPI(f)
+	p.cachedConfig.Store(snapshotFor(f.config))
 	args.Command = "/aitagent request Changed goal"
 	if !strings.Contains(invoke(t, p, args), "conflicts") || readOnlyReceipt(t, f).Goal != original.Goal {
 		t.Fatal("replay changed original receipt")
@@ -299,6 +301,9 @@ func TestAnotherAllowedAccountCannotReadReceipt(t *testing.T) {
 	f.config.AllowedRequesterIDs += "," + other
 	f.users[other] = &model.User{Id: other}
 	f.members[other] = true
+	if err := p.OnConfigurationChange(); err != nil {
+		t.Fatal(err)
+	}
 	invoke(t, p, args)
 	r := readOnlyReceipt(t, f)
 	args.Command = "/aitagent status " + r.ID

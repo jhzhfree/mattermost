@@ -1,4 +1,4 @@
-# AI-TAgent local request intake (0.2.1)
+# AI-TAgent local request intake (0.2.2)
 
 This independent server plugin implements a small collaboration entry point:
 an explicitly allowed human submits a goal for one configured digital employee,
@@ -28,7 +28,7 @@ make test
 make bundle
 ```
 
-The Linux amd64 bundle is `dist/ai-tagent-intake-0.2.1-linux-amd64.tar.gz`.
+The Linux amd64 bundle is `dist/ai-tagent-intake-0.2.2-linux-amd64.tar.gz`.
 The manifest requires Mattermost 12.2.0, the repository's development baseline;
 compatibility with older servers is not claimed. The bundle retains the root
 license unchanged. Building a plugin does not grant a commercial feature license.
@@ -274,12 +274,13 @@ cannot certify a clean primary or the absence of old writers. If that deployment
 verification cannot be performed, leave `QuotaStorageReady=false`: safe upgrade
 is blocked. No deployment readiness was certified in the offline tests.
 
-## Process-local overload protection (0.2.1)
+## Process-local overload protection (0.2.2)
 
-Before configuration/identity/KV RPCs, each process applies a rolling 60-second
-work limiter to syntactically valid command attempts from a server-supplied user
-ID. Rejected authorization, storage failure and duplicate dispatch attempts also
-consume this local budget. There are no refunds on cancellation or errors.
+After the rejection-only configuration prefilter described below, and before
+per-command configuration/identity/KV RPCs, each process applies a rolling
+60-second work limiter to eligible command attempts from a server-supplied user
+ID. For prefilter-eligible callers, rejected live authorization, storage failure
+and duplicate dispatch attempts still consume this local budget. There are no refunds on cancellation or errors.
 
 | Process-local scope | Attempts per rolling 60 seconds |
 | --- | --- |
@@ -294,8 +295,8 @@ not allocate an unbounded user map or queue. It uses the local monotonic clock
 where available and has no distributed coordination: another node or a process
 restart has a different/empty work budget. These are **not cluster-global read
 or cancellation limits**. The existing shared admission/pending quotas still
-apply independently. Requests rejected by the local limiter do not call plugin
-APIs, but can already have been captured by the server's command audit pipeline.
+apply independently. Requests rejected by the prefilter or local limiter do not call plugin APIs,
+but can already have been captured by the server's command audit pipeline.
 
 Successful `status`, same-dispatch replay and repeat cancellation still confirm
 the snapshot with a whole-ledger CAS. This deliberately retains the primary-side
@@ -304,6 +305,65 @@ than silently downgrade status to a confirmed-looking replica read. Whole-ledger
 write amplification and hot-key contention remain scaling limits. Cluster-wide
 ingress budgets and a future authoritative bounded-read/store design must be
 verified before 1.0; adding nodes multiplies the process-local allowance.
+
+### Rejection-only scope prefilter (0.2.2)
+
+In 0.2.1, the 60-attempt process budget was charged before allowlist/channel
+checks. Other authenticated accounts invoking the command in their own channels
+could consume that budget even though the plugin subsequently refused them.
+That was cross-scope availability interference, not tenant isolation.
+
+Version 0.2.2 loads a small immutable rejection snapshot during activation and
+`OnConfigurationChange`. It contains the configured team/channel and a map of
+the administrator-provided requester IDs; the existing 8192-byte configuration
+limit bounds that map. Incoming caller IDs never grow the cache. Requests outside
+that snapshot are rejected **before** the process limiter and all per-command
+API calls, without storing per-caller history. The plugin trusts only command
+metadata supplied by Mattermost; `api4/command.go` sets the user from the session
+and derives team from the channel. Goal text cannot provide identity or scope.
+This does not prevent the server's upstream parsing, permission checks or audit
+work, so server-level ingress limits remain necessary.
+
+The cache is **only a rejection filter**, never an authorization result. Every
+eligible request still loads current configuration and checks current user/Bot,
+membership and post permission through the guarded APIs. An old snapshot cannot
+grant revoked access. A newly eligible caller may be conservatively rejected
+until a successful configuration refresh; commands do not trigger refresh RPCs
+on cache misses, which would recreate the unauthenticated resource problem.
+
+Refresh invalidates the snapshot before loading. A failed or overlapping refresh
+keeps intake closed; an old in-flight result cannot overwrite a newer
+invalidation. At most one synchronous configuration load is allowed per process,
+with no queued refresh workers. If overlapping events supersede the first load,
+an administrator must retry a supported configuration refresh/reactivation after
+recovery. This callback is an additional lifecycle RPC outside the four command
+slots and has no cancellable SDK deadline. A permanently blocked refresh requires
+runtime recovery; the plugin does not spawn retries or reset the ledger. The
+`config_prefilter_ready` gauge means only that a valid configuration snapshot was
+loaded, not that permissions, Bot status, transport or the deployment are ready.
+
+Residual negative scenarios are tested and remain 1.0 gates:
+
+- Configured, scope-matching callers still need live checks. For example,
+  60 different listed accounts can have valid upstream command permission but
+  fail the plugin check while the target Bot is disabled. Their attempts fill
+  the shared process budget; after the Bot is re-enabled, another legitimate
+  caller can still be rate-limited until the window advances. Stale cached scope
+  can also conservatively admit work to a live check that will reject it. This
+  mitigation is not tenant fairness, tenant-independent availability, or a
+  cluster-global request limiter.
+- A **single** overdue command RPC stops new eligible work even if three slots
+  are free. This is the existing deliberate circuit behavior, not isolation of
+  the caller causing the slow RPC. The slot remains occupied until the actual
+  call returns, then the 30-second process cooldown applies. Tests demonstrate
+  the rejection, metrics, absence of replacement RPCs, and recovery after release.
+- Configuration refresh failure closes intake for all callers of that process.
+  Config-event delivery/coherence across actual Mattermost nodes is not verified.
+
+Before 1.0, tenant/account identity boundaries and fair, authenticated resource
+budgets must be designed and validated at the appropriate server/ingress layer,
+including known-caller abuse and backend failures. Neither this snapshot nor
+`QuotaStorageReady` is proof of tenant isolation or safe migration.
 
 ### Work budget, RPC cancellation and recovery
 
@@ -352,7 +412,9 @@ Metrics include `aitagent_process_inflight`, `oldest_work_seconds`,
 `aitagent_process_` prefix for `commands_started_total`, `rate_rejected_total`,
 `overload_rejected_total`, `budget_exceeded_total`, `cas_not_confirmed_total`,
 `cas_exhausted_total`, `observed_storage_errors_total`, and
-`uncertain_writes_total`. A budget-exceeded counter increments when the command
+`uncertain_writes_total`. Version 0.2.2 adds `config_prefilter_ready` and
+`config_refresh_inflight` gauges, plus `prefilter_rejected_total` and
+`config_refresh_failed_total` counters with the same prefix. A budget-exceeded counter increments when the command
 returns; overdue gauges expose work that has not returned yet. CAS
 non-confirmation includes false results that may hide transport failures; error
 counters cannot detect failures swallowed by the SDK. Metrics are reset on
@@ -385,6 +447,13 @@ acknowledgements, missing replica reads, and a blocked-API test that retains all
 four slots until the test explicitly releases the calls. The test verifies that
 we do not pretend an uncancellable call has timed out or launch replacement
 workers. All test goroutines are released/joined; no live server is contacted.
+
+Scope tests additionally show 640 concurrent foreign requests consume no
+configuration RPC or local work budget while legitimate intake succeeds, verify
+cache invalidation and stale-refresh rejection, and preserve the negative tests
+for eligible-but-denied callers exhausting shared capacity and a single overdue
+RPC blocking other callers. Simulated blocked configuration calls are always
+released/joined; there is no background refresh worker.
 
 An optional `python3 tests/postgres_cas.py` check uses an already-cached official
 `postgres:15` image on the managed Docker socket. It creates a disposable

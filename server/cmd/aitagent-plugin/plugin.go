@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -27,12 +28,14 @@ const (
 // or calls to create posts.
 type Plugin struct {
 	plugin.MattermostPlugin
-	guard       processGuard
-	sharedGuard *processGuard
-	budget      *workBudget
-	workClock   func() time.Time
-	retrySleep  func(time.Duration)
-	clock       func() int64 // injected only by offline tests
+	guard        processGuard
+	sharedGuard  *processGuard
+	budget       *workBudget
+	workClock    func() time.Time
+	retrySleep   func(time.Duration)
+	clock        func() int64 // injected only by offline tests
+	cachedConfig atomic.Pointer[configSnapshot]
+	refreshing   atomic.Bool
 }
 
 type configuration struct {
@@ -67,6 +70,9 @@ type receipt struct {
 }
 
 func (p *Plugin) OnActivate() error {
+	if err := p.OnConfigurationChange(); err != nil {
+		return err
+	}
 	return p.API.RegisterCommand(&model.Command{
 		Trigger:          "aitagent",
 		AutoComplete:     true,
@@ -151,6 +157,10 @@ func (p *Plugin) ExecuteCommand(_ *plugin.Context, args *model.CommandArgs) (*mo
 		return reply(usage)
 	}
 	guard := p.observation()
+	if denial := p.prefilter(args); denial != "" {
+		guard.prefilterRejected.Add(1)
+		return reply(denial)
+	}
 	budget, denial := guard.enter(args.UserId, fields[1], p.wallNow)
 	if budget == nil {
 		return reply(denial)
@@ -181,10 +191,10 @@ func (p *Plugin) executeCommand(args *model.CommandArgs) (*model.CommandResponse
 	}
 	var config configuration
 	if err := p.API.LoadPluginConfiguration(&config); err != nil || !config.valid() {
-		return reply("Digital employee intake is disabled or not configured.")
+		return reply(configUnavailableMessage)
 	}
 	if !p.authorize(config, args) {
-		return reply("This request is not permitted for the current user, employee, and channel binding.")
+		return reply(notPermittedMessage)
 	}
 	if fields[1] == "status" || fields[1] == "cancel" {
 		if len(fields) != 3 || !validReceiptID(fields[2]) {

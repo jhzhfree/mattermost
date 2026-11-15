@@ -38,20 +38,22 @@ type commandEvent struct {
 	user, mode string
 }
 type processGuard struct {
-	mu              sync.Mutex
-	events          []commandEvent           // bounded by maxProcessCommands; no unbounded per-user map
-	running         map[*workBudget]struct{} // at most four synchronous calls; never abandoned
-	cooldownUntil   time.Time
-	lastNow         time.Time
-	active          atomic.Int32
-	started         atomic.Uint64
-	rateRejected    atomic.Uint64
-	overloaded      atomic.Uint64
-	budgetExceeded  atomic.Uint64
-	casNotConfirmed atomic.Uint64
-	casExhausted    atomic.Uint64
-	storageErrors   atomic.Uint64
-	uncertainWrites atomic.Uint64
+	mu                  sync.Mutex
+	events              []commandEvent           // bounded by maxProcessCommands; no unbounded per-user map
+	running             map[*workBudget]struct{} // at most four synchronous calls; never abandoned
+	cooldownUntil       time.Time
+	lastNow             time.Time
+	active              atomic.Int32
+	started             atomic.Uint64
+	rateRejected        atomic.Uint64
+	overloaded          atomic.Uint64
+	budgetExceeded      atomic.Uint64
+	casNotConfirmed     atomic.Uint64
+	casExhausted        atomic.Uint64
+	storageErrors       atomic.Uint64
+	uncertainWrites     atomic.Uint64
+	prefilterRejected   atomic.Uint64
+	configRefreshFailed atomic.Uint64
 }
 
 func (p *Plugin) observation() *processGuard {
@@ -229,6 +231,16 @@ func (p *Plugin) ServeMetrics(_ *plugin.Context, w http.ResponseWriter, r *http.
 	active := len(g.running)
 	g.mu.Unlock()
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+	ready := 0
+	if snapshot := p.cachedConfig.Load(); snapshot != nil && snapshot.ready {
+		ready = 1
+	}
+	fmt.Fprintf(w, "aitagent_process_config_prefilter_ready %d\n", ready)
+	refreshing := 0
+	if p.refreshing.Load() {
+		refreshing = 1
+	}
+	fmt.Fprintf(w, "aitagent_process_config_refresh_inflight %d\n", refreshing)
 	fmt.Fprintf(w, "aitagent_process_inflight %d\naitagent_process_oldest_work_seconds %g\naitagent_process_overdue_commands %d\naitagent_process_cooldown_seconds %g\n", active, oldest, overdue, cooldown)
 	for _, metric := range []struct {
 		name  string
@@ -237,6 +249,7 @@ func (p *Plugin) ServeMetrics(_ *plugin.Context, w http.ResponseWriter, r *http.
 		{"commands_started", g.started.Load()}, {"rate_rejected", g.rateRejected.Load()}, {"overload_rejected", g.overloaded.Load()},
 		{"budget_exceeded", g.budgetExceeded.Load()}, {"cas_not_confirmed", g.casNotConfirmed.Load()}, {"cas_exhausted", g.casExhausted.Load()},
 		{"observed_storage_errors", g.storageErrors.Load()}, {"uncertain_writes", g.uncertainWrites.Load()},
+		{"prefilter_rejected", g.prefilterRejected.Load()}, {"config_refresh_failed", g.configRefreshFailed.Load()},
 	} {
 		fmt.Fprintf(w, "aitagent_process_%s_total %d\n", metric.name, metric.value)
 	}
