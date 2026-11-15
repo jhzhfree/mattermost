@@ -1,4 +1,97 @@
-# AI-TAgent local request intake (0.2.2)
+# AI-TAgent local request intake (0.2.3)
+
+## Offline request-proof boundary added in 0.2.3
+
+This version adds executable offline validation for a proposed Mattermost →
+Octop handoff, **not a connected handoff or an implemented Octop protocol**.
+`handoff.go` converts an owned, pending, unexpired receipt snapshot into an intent;
+`internal/handoff` signs and verifies that intent using Ed25519 and SHA-256 from
+the Go standard library. No command, hook, HTTP route or background worker invokes
+the conversion/signer. There is no network client, key loader/provider, configured
+secret, endpoint, new enable switch or receipt-state transition. Plugin behavior
+and its existing default-off settings remain unchanged.
+
+### Source findings and why runtime wiring remains blocked
+
+Inspected Octop branch `feature/akb-octop-litellm-dev` at commit
+[`e2c78d8b192daafbc7d8dcb5970afd0e9b40891b`](https://github.com/jhzhfree/Octop/tree/e2c78d8b192daafbc7d8dcb5970afd0e9b40891b):
+
+- `src/octop/api/middleware/jwt_auth.py` and `api/deps.py` authenticate existing
+  user API requests. They are not a Mattermost service-identity/mapped-user intake
+  contract. Reusing an operator's JWT would confuse service and user identity.
+- `infra/digital_workers/mattermost.py` checks organization manager/admin and
+  Agent access for readiness/intents. Intents remain unverified and cannot grant
+  execution or sending. `infra/db/repos/mattermost_intents.py` rechecks permission
+  predicates and revisions during its configuration write; it is not a task inbox.
+- `infra/digital_workers/mattermost_verification.py` requires an exact offline
+  MockTransport even at the lowest entry point. The readiness document explicitly
+  blocks live credentials until broker/executor secret isolation is implemented.
+  Draft metadata, Bot observation and publication preview cannot authenticate an
+  inbound Mattermost request or authorize task execution.
+
+Accordingly this implementation does not route text into Octop chat, accept a
+fixed shared key, invent a service endpoint, or relax TLS/credential isolation.
+No code from Octop was copied and no Octop repository was changed.
+
+### What the offline code establishes
+
+The caller must supply receiver-owned public-key trust, enabled state, key ID,
+exact instance/audience/organization/employee/user/team/channel/Bot binding, and
+the mapped Octop actor ID. The actor ID is absent from the sender's proof. The
+signed intent preserves `user_requested`: an account submitted text, not proof
+of a human at the keyboard, an approval, or an automatic execution identity.
+Goal text remains untrusted data regardless of the signature.
+
+Proofs use an explicit domain prefix, an issued/expiry interval of at most 120
+seconds, and receiver-owned current time. No future-issued or expired proof is
+accepted. Input is capped at 32 KiB; goal at 2000 Unicode code points; IDs and
+scope labels are bounded. Canonical JSON validation rejects duplicate/unknown
+fields (including fabricated authorization flags), alternate representations and
+trailing content. Invalid input returns one fixed error without the goal/proof.
+The proposed ordered JSON format uses Go's encoding, including HTML escaping;
+it is not JCS/JWT/AKB identity SDK interoperability. Cross-language vectors and
+protocol review are required before implementing an Octop endpoint.
+
+Successful verification returns only a `Candidate`. A delivery key binds source
+instance, audience and receipt ID. A fingerprint additionally binds the full
+intent and receiver-mapped actor. Renewing proof time or rotating the signing key
+does not create a new delivery key; modified content or actor mapping changes the
+fingerprint. This is **receipt-level identity**, not business idempotency: a new
+slash-command dispatch has another receipt and can represent the same business
+request. Verification itself has no replay cache and accepts an otherwise valid
+replay. It does not lock current permission, cancellation or configuration.
+
+### Verification and remaining handoff gates
+
+`make test` now includes subpackages. Tests create ephemeral random signing keys
+only in memory and run without sockets, DNS, credentials or external services.
+The actual command fixture produces a ledger receipt, converts it, signs it and
+verifies it; the ledger remains pending and unchanged. Tests cover corrupted,
+cancelled, expired and mismatched receipt snapshots; proof tampering; cross-scope
+and cross-audience rejection; revoked keys/policies; unknown/duplicate fields;
+size/time limits; and 32 concurrent deliveries into a **test-only in-memory inbox**.
+The simulated inbox compares key/fingerprint atomically, detects conflicting
+retries and checks revocation before recognizing duplicates. It is not a durable
+Octop inbox, does not test crash recovery and never executes a goal.
+
+Before runtime wiring: establish an independently isolated signer/broker and
+receiver trust provisioning, key rotation/revocation and authenticated TLS target
+policy; implement a reviewed Octop ingress with live user mapping and organization/
+Agent authorization; atomically commit durable pending intake, replay/conflict
+record and audit; define retention and recovery for ambiguous acknowledgements;
+add a persistent sender outbox and reconcile the original receipt rather than
+blindly create another request. Primary-confirmed receipt reads and live permission/
+cancellation checks are required at issuance, with explicit in-flight revocation
+semantics. Receipt conversion alone cannot provide those guarantees. Signing
+provides integrity, not confidentiality; proof payloads contain goal text and must
+never enter metrics/logs or be treated as public artifacts. Bound receiver work
+and test database/cluster failures and cross-language behavior before real TLS
+and isolated instance acceptance. There is no production secret custody here.
+
+The 0.2.2 shared-budget interference, uncancellable RPCs, migration requirements,
+tombstone exhaustion, delayed physical cleanup, separate server audit retention
+and replica/unknown-write limitations below remain 1.0 blockers. No completion,
+execution, delivery, approval or exactly-once claim is introduced by this slice.
 
 This independent server plugin implements a small collaboration entry point:
 an explicitly allowed human submits a goal for one configured digital employee,
@@ -28,7 +121,7 @@ make test
 make bundle
 ```
 
-The Linux amd64 bundle is `dist/ai-tagent-intake-0.2.2-linux-amd64.tar.gz`.
+The Linux amd64 bundle is `dist/ai-tagent-intake-0.2.3-linux-amd64.tar.gz`.
 The manifest requires Mattermost 12.2.0, the repository's development baseline;
 compatibility with older servers is not claimed. The bundle retains the root
 license unchanged. Building a plugin does not grant a commercial feature license.
