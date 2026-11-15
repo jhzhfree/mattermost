@@ -26,7 +26,7 @@ func TestGuardedSourceUsesConfirmedKVAndRedactsGoal(t *testing.T) {
 	}
 	reader := p.handoffSourceReader(sourceBinding{Enabled: true, Binding: i.Binding})
 	observation, err := reader(context.Background(), i.Binding, r.ID)
-	if err != nil || observation.Commitment != handoff.IntentCommitment(i) || f.writes != 2 {
+	if err != nil || observation.Commitment != handoff.IntentCommitment(i) || f.writes != 2 || observation.Version != readLedger(t, f).Revision {
 		t.Fatal("source was not primary-confirmed", err)
 	}
 	encoded, _ := json.Marshal(observation)

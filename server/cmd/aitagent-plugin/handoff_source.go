@@ -51,7 +51,15 @@ func (p *Plugin) handoffSourceReader(trusted sourceBinding) handoff.SourceReader
 			!worker.authorize(config, args) {
 			return deny()
 		}
-		r, err := worker.lookup(id, config, args, false)
+		var confirmedVersion uint64
+		r, err := worker.mutate(func(s *ledger, at int64) (*receipt, error) {
+			r := s.Receipts[id]
+			if !ownedReceiptAt(r, id, config, args, at) {
+				return nil, errMissing
+			}
+			confirmedVersion = s.Revision + 1 // mutate writes this exact revision via CAS
+			return r, nil
+		})
 		if err != nil {
 			return deny()
 		}
@@ -64,6 +72,6 @@ func (p *Plugin) handoffSourceReader(trusted sourceBinding) handoff.SourceReader
 		if err != nil {
 			return deny()
 		}
-		return handoff.SourceRecord{Commitment: handoff.IntentCommitment(intent), State: r.State, ReceiptExpiresAt: r.ExpiresAt}, nil
+		return handoff.SourceRecord{Commitment: handoff.IntentCommitment(intent), State: r.State, ReceiptExpiresAt: r.ExpiresAt, Version: confirmedVersion}, nil
 	}
 }

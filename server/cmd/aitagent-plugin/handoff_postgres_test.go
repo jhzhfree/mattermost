@@ -71,6 +71,15 @@ func TestOfflinePGSourceToPendingInbox(t *testing.T) {
 	if got := accept(); got != handoff.IntakeDuplicate {
 		t.Fatal(got)
 	}
+	machine := handoff.NewOfflineStateMachine(true, db, func(ctx context.Context, tx *sql.Tx, p handoff.Policy, c handoff.Candidate, _ handoff.ReviewAction) error {
+		return authorize(ctx, tx, p, c)
+	})
+	if got := machine.Review(context.Background(), proof, policy, 1, digest("authorize"), handoff.ReviewAuthorization, func() int64 { return now / 1000 }, source); got != handoff.ReviewRecorded {
+		t.Fatal(got)
+	}
+	if got := machine.Review(context.Background(), proof, policy, 2, digest("execution-review"), handoff.ReviewExecution, func() int64 { return now / 1000 }, source); got != handoff.ReviewRecorded {
+		t.Fatal(got)
+	}
 	f.permission = false
 	if got := accept(); got != handoff.IntakeRejected {
 		t.Fatal("source revocation ignored", got)
@@ -78,12 +87,23 @@ func TestOfflinePGSourceToPendingInbox(t *testing.T) {
 	f.permission = true
 	args.Command = "/aitagent cancel " + r.ID
 	invoke(t, p, args)
-	if got := accept(); got != handoff.IntakeRejected {
+	if got := machine.Review(context.Background(), proof, policy, 3, digest("cancelled-source"), handoff.ReviewAuthorization, func() int64 { return now / 1000 }, source); got != handoff.ReviewDenied {
 		t.Fatal("source cancellation ignored", got)
 	}
-	for _, table := range []string{"aitagent_intake", "aitagent_intake_audit"} {
+	candidate, err := handoff.Verify(proof, policy, now/1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, outcome := machine.Inspect(context.Background(), candidate.DeliveryKey, policy)
+	if outcome != handoff.ReviewRecorded || stored.State != "blocked" || stored.Revision != 4 {
+		t.Fatal("reconciliation lost blocked state", stored, outcome)
+	}
+	if got := machine.Cancel(context.Background(), candidate.DeliveryKey, policy, 4, digest("local-cancel")); got != handoff.ReviewCancelled {
+		t.Fatal(got)
+	}
+	for table, want := range map[string]int{"aitagent_intake": 1, "aitagent_intake_audit": 5} {
 		var count int
-		if err := db.QueryRow("SELECT count(*) FROM " + table).Scan(&count); err != nil || count != 1 {
+		if err := db.QueryRow("SELECT count(*) FROM " + table).Scan(&count); err != nil || count != want {
 			t.Fatal("duplicate or lost transaction", err, count)
 		}
 	}

@@ -184,6 +184,7 @@ type SourceRecord struct {
 	Commitment       string
 	State            string
 	ReceiptExpiresAt int64
+	Version          uint64 // confirmed source ledger revision, not a transferable permit
 }
 
 // IntentCommitment allows an authenticated source lookup to confirm the exact
@@ -210,21 +211,31 @@ type SourceReader func(context.Context, Binding, string) (SourceRecord, error)
 // must honor context deadlines; this function cannot forcibly cancel a blocked
 // implementation and deliberately spawns no timeout goroutine.
 func VerifyWithSource(ctx context.Context, data []byte, p Policy, now func() int64, read SourceReader) (Candidate, error) {
+	candidate, _, err := observeVerified(ctx, data, p, now, read)
+	return candidate, err
+}
+
+func observeVerified(ctx context.Context, data []byte, p Policy, now func() int64, read SourceReader) (Candidate, SourceRecord, error) {
+	deny := func() (Candidate, SourceRecord, error) { return Candidate{}, SourceRecord{}, ErrRejected }
 	if ctx == nil || now == nil || read == nil || ctx.Err() != nil {
-		return Candidate{}, ErrRejected
+		return deny()
 	}
 	before := now()
 	candidate, err := Verify(data, p, before)
 	if err != nil {
-		return Candidate{}, ErrRejected
+		return deny()
 	}
 	source, err := read(ctx, candidate.Intent.Binding, candidate.Intent.Receipt)
-	if err != nil || ctx.Err() != nil || source.State != "awaiting_octop_authorization" || source.Commitment != IntentCommitment(candidate.Intent) || source.ReceiptExpiresAt != candidate.Intent.ReceiptExpiresAt {
-		return Candidate{}, ErrRejected
+	if err != nil || ctx.Err() != nil || source.Version == 0 || source.Version > uint64(1<<63-1) || source.State != "awaiting_octop_authorization" || source.Commitment != IntentCommitment(candidate.Intent) || source.ReceiptExpiresAt != candidate.Intent.ReceiptExpiresAt {
+		return deny()
 	}
 	after := now()
 	if after < before {
-		return Candidate{}, ErrRejected
+		return deny()
 	}
-	return Verify(data, p, after)
+	candidate, err = Verify(data, p, after)
+	if err != nil {
+		return deny()
+	}
+	return candidate, source, nil
 }

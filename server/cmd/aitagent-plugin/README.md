@@ -1,4 +1,149 @@
-# AI-TAgent local request intake (0.2.5)
+# AI-TAgent local request intake (0.2.6)
+
+## Versioned review, local cancellation and independent reconciliation (0.2.6)
+
+The offline PostgreSQL kernel now has a persistent review state machine. It is
+called by the isolated source → inbox integration test, but **no state is an
+execution permission**. There is still no executor, automatic task, message send,
+production identity adapter, runtime route or setting enabling this path. The
+zero value and disabled/missing-authorizer constructors reject work. A valid
+signature or a past positive observation never suffices for a new review.
+
+### State and transition contract
+
+| Stored state | Meaning and allowed next actions |
+| --- | --- |
+| `pending_authorization` | Intake metadata only; authorization review or local cancellation |
+| `authorization_observed` | Historical live-check observation; execution review must repeat all checks |
+| `execution_observed` | Historical pre-execution check, **not runnable**; another cycle requires authorization review |
+| `blocked` | A review failed source/version/time checks; explicit fresh authorization review is required to recover |
+| `cancelled` | Terminal local fence; no review or duplicate intake can revive it |
+
+`StateMachine.Review` takes an explicit authorization-review or execution-review
+action, an expected local revision and a bounded canonical operation ID. Every
+attempt, including retries, verifies the proof and target binding, calls the
+current source reader, checks source state/expiry/commitment, and requires a
+confirmed source revision **newer than the last persisted observation**. It then
+locks the inbox row, checks the exact fingerprint/target and action-specific
+receiver rights/trust in the transaction, and rechecks proof time before commit.
+Execution review requires a prior authorization observation but does not return
+a lease, credential, reusable approval or execution token. Result codes explicitly
+say `no_execution`. There is no transition to `running`, `executed` or `completed`.
+
+Source errors, cancelled/unknown/missing state, stale version and expiry deny the
+operation. If local rights, expected revision, context and history capacity permit,
+the kernel additionally commits a `blocked` state and audit together. If it cannot
+persist that evidence, it still denies/returns unavailable or commit-unknown;
+an older positive state is only history and cannot authorize another operation.
+A timed-out source lookup may therefore leave the previous historical state.
+Local permission failure cannot be used by an unauthorized caller to mutate it.
+Concurrent stale expected revisions do not overwrite a newer transition.
+
+The source adapter reports the **ledger revision written by its successful CAS**,
+not a caller-supplied counter. This is installation-wide observation metadata,
+not a per-receipt mutation version or tenant-isolated counter. Missing/zero/out-of-
+range versions are rejected. It helps detect non-increasing/replayed observations,
+but is not authentication, a lease or a rollback-proof epoch. A database restore
+and subsequent counter catch-up can evade simple monotonic comparisons. Real
+deployment needs a trusted instance/restore epoch and an explicit rollback/upgrade
+protocol; neither this counter nor key rotation can establish that guarantee.
+
+### Local terminal cancellation and recovery without an old proof
+
+`StateMachine.Cancel` uses the original delivery key, expected local revision and
+operation ID. It rechecks independent local action rights and exact stored target,
+then atomically writes terminal cancellation and its audit. No source availability
+or unexpired proof is needed. A competing in-flight review locks the same row and
+cannot revive a committed cancellation. Duplicate cancellation rechecks rights
+and remains terminal without another audit write. This cancels **only local
+pending metadata**; it does not propagate cancellation to Mattermost or stop an
+external process. There is no such process in this implementation.
+
+`StateMachine.Inspect` separately authorizes the current local caller and target,
+then returns stored state, revision, last source revision and bounded operation
+history. It does not call the source or require the old proof to remain valid.
+History contains action/revision/operation ID only, with no goal or proof. The
+kernel checks sequential audit revisions and matching fingerprints before returning
+it; this detects some corruption, not tampering by a database owner. Missing/error
+is reported as unavailable, **not proof of non-commit**. Callers must query the
+correct primary and reconcile original operation IDs after lost acknowledgements,
+never invent a new delivery key or delete/reinsert to guess the outcome.
+
+Policy's mapped actor identifies the resource owner, **not an authenticated local
+caller**. The required action authorizer must obtain that caller from a separate,
+verified server context/closure. Do not deserialize policy or accept a submitted
+actor/organization ID as login evidence. The tests use a synthetic action-permission
+table and locks; actual Octop session/manager/Agent authorization is not wired.
+Revoked local rights appropriately block recovery queries too; privileged operator
+recovery needs its own reviewed authorization path, not an auth bypass.
+
+### Persistent idempotency, audit and bounded history
+
+Intake duplicates now report `duplicate_retained_intake`, without changing the
+stored review state or suggesting it is executable. Each row has a local revision;
+state change and the corresponding audit event are
+one transaction. `(delivery_key, operation_id)` is unique. A retry of a recorded
+review is recognized only after current proof/source/local checks; it cannot
+restore a subsequently blocked or cancelled state. Changing the action with the
+same operation ID conflicts. Commit errors remain `commit_unknown_no_execution`.
+Tests inject errors after real review/cancellation commits and recover via a new
+connection, original key and recorded operation IDs. Audit failure rolls back
+the state transition. The persistent record is not task-level business idempotency.
+
+History is intentionally bounded: initial intake is revision 1, reviews/blocked
+transitions stop at revision 7, and revision 8 is reserved for terminal cancellation.
+Exhaustion denies further review, not permission to reset history. The installation
+still retains at most 128 inbox rows. Cancellation/expiry does **not** release that
+cap, and there is no completion, pruning, tombstone archive or reset API: after
+128 retained rows the prototype stops accepting new intake indefinitely. A safe
+retention/replay horizon, migration and archival design remains a 1.0 prerequisite.
+
+### What remains impossible to infer from these checks
+
+The last source read and local commit are not a distributed atomic transaction.
+A retained negative test makes the source unavailable/cancelled after its last
+positive read and still records `execution_observed`; the next review fails and
+can block the row. This demonstrates why historical observations must never be
+consumed as executable approvals. A real execution path needs an authenticated
+source claim/cancellation protocol and local execution fencing/idempotency, plus
+defined in-flight cancellation and crash-recovery semantics. Repeating a read
+cannot eliminate the final race. No distributed absolute atomicity is promised.
+
+Independent stored-state reconciliation is now executable in the offline kernel,
+but there is no authenticated HTTP reconciliation endpoint or sender outbox.
+Durable sender identity/retry state, cancellation propagation, restore epochs,
+service authentication/TLS freshness, secret/executor isolation and actual Octop
+permissions are still wiring gates. Source/receiver callbacks must honor context;
+an issued Mattermost RPC remains uncancellable. Earlier process-budget sharing,
+capacity and physical-retention/audit limitations remain unchanged.
+
+### Test and database-privilege limits
+
+The cached, network-isolated PostgreSQL 15.20 harness now exercises actual source
+CAS → intake → authorization review → execution review → source cancellation →
+blocked history → independently authorized local cancellation. Other tests cover
+concurrent revisions, local cancellation racing an in-flight review, stale source
+versions, action/key revocation, rotation, audit rollback, review/cancel unknown
+commits, independent recovery after expiry, source/SQL timeouts and bounded history.
+The ordinary Go suite runs with `-race`; the isolated PG binaries remain non-race
+builds. Public Go/Python/OpenSSL proof vectors remain valid (signed proof v2 is
+unchanged; trusted source observation now additionally requires a version).
+
+**The fixture uses the PostgreSQL superuser.** It proves transaction behavior under
+these tests, not least-privilege runtime access or audit tamper resistance. Its
+Mattermost side is a fake API/KV implementation, not a live second service. No
+production privileges were inspected or changed. Before deployment, design a
+separate schema/migration owner, constrained runtime transition permissions,
+read-only reconciliation access and audit append-only permissions; test denial of
+audit UPDATE/DELETE/TRUNCATE and unauthorized metadata/grant changes. In particular,
+do not grant broad permission-table UPDATE merely to obtain row locks. A privileged
+DB owner can rewrite local history; resisting that requires an independent audit
+trust/retention design. None of these role controls is implemented by this DDL.
+
+The expanded SQL schema is created only in the disposable harness. No migration
+from the earlier offline fixture or a real Octop schema is supplied. Do not apply
+it to existing data or clear rows to upgrade. There is no new production enable
+switch. These additions improve a testable safety boundary, not 1.0 readiness.
 
 ## Confirmed source observation → durable pending inbox (0.2.5)
 
@@ -363,7 +508,7 @@ make test
 make bundle
 ```
 
-The Linux amd64 bundle is `dist/ai-tagent-intake-0.2.5-linux-amd64.tar.gz`.
+The Linux amd64 bundle is `dist/ai-tagent-intake-0.2.6-linux-amd64.tar.gz`.
 The manifest requires Mattermost 12.2.0, the repository's development baseline;
 compatibility with older servers is not claimed. The bundle retains the root
 license unchanged. Building a plugin does not grant a commercial feature license.

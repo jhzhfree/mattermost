@@ -24,7 +24,7 @@ const (
 	IntakeConflict    IntakeOutcome = "conflict"
 	IntakeFull        IntakeOutcome = "retained_capacity_reached"
 	IntakePending     IntakeOutcome = "pending_authorization"
-	IntakeDuplicate   IntakeOutcome = "duplicate_pending_authorization"
+	IntakeDuplicate   IntakeOutcome = "duplicate_retained_intake"
 )
 
 // ReceiverAuthorizer must lock/recheck current receiver trust, mapping, account,
@@ -60,16 +60,21 @@ func (s *Inbox) Accept(ctx context.Context, proof []byte, policy Policy, now fun
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	lastCheck := now()
-	current := func() bool {
+	rewound := false
+	checkedNow := func() int64 {
 		next := now()
 		if next < lastCheck {
-			return false
+			rewound = true
 		}
 		lastCheck = next
-		_, err := Verify(proof, policy, next)
-		return err == nil && ctx.Err() == nil
+		return next
 	}
-	candidate, err := VerifyWithSource(ctx, proof, policy, now, source)
+	current := func() bool {
+		next := checkedNow()
+		_, err := Verify(proof, policy, next)
+		return !rewound && err == nil && ctx.Err() == nil
+	}
+	candidate, observation, err := observeVerified(ctx, proof, policy, checkedNow, source)
 	if err != nil {
 		return IntakeRejected
 	}
@@ -97,10 +102,14 @@ func (s *Inbox) Accept(ctx context.Context, proof []byte, policy Policy, now fun
 	if !current() {
 		return IntakeRejected
 	}
-	var fingerprint string
-	err = tx.QueryRowContext(ctx, "SELECT fingerprint FROM aitagent_intake WHERE delivery_key=$1", candidate.DeliveryKey).Scan(&fingerprint)
+	var fingerprint, state string
+	var sourceVersion int64
+	err = tx.QueryRowContext(ctx, "SELECT fingerprint,state,source_version FROM aitagent_intake WHERE delivery_key=$1", candidate.DeliveryKey).Scan(&fingerprint, &state, &sourceVersion)
 	if err == nil {
 		if !current() {
+			return IntakeRejected
+		}
+		if state == "cancelled" || observation.Version < uint64(sourceVersion) {
 			return IntakeRejected
 		}
 		if fingerprint != candidate.Fingerprint {
@@ -118,7 +127,7 @@ func (s *Inbox) Accept(ctx context.Context, proof []byte, policy Policy, now fun
 	if count >= 128 {
 		return IntakeFull
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO aitagent_intake(delivery_key,fingerprint,organization_id,employee_id,actor_id,source_expires_at,state) VALUES($1,$2,$3,$4,$5,$6,'pending_authorization')`, candidate.DeliveryKey, candidate.Fingerprint, candidate.OctopOrganizationID, candidate.OctopEmployeeID, candidate.OctopActorID, candidate.Intent.ReceiptExpiresAt)
+	_, err = tx.ExecContext(ctx, `INSERT INTO aitagent_intake(delivery_key,fingerprint,organization_id,employee_id,actor_id,source_expires_at,state,source_version) VALUES($1,$2,$3,$4,$5,$6,'pending_authorization',$7)`, candidate.DeliveryKey, candidate.Fingerprint, candidate.OctopOrganizationID, candidate.OctopEmployeeID, candidate.OctopActorID, candidate.Intent.ReceiptExpiresAt, int64(observation.Version))
 	if err != nil {
 		return IntakeUnavailable
 	}

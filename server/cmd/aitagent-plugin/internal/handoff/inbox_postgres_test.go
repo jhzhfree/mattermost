@@ -236,7 +236,7 @@ func TestOfflinePGAuditRollbackCommitUnknownAndLimits(t *testing.T) {
 	countRows(t, db, 1)
 	// A retained cap is deliberately not reset by source expiry or cancellation.
 	for n := 0; n < 127; n++ {
-		if _, err := db.Exec(`INSERT INTO aitagent_intake VALUES($1,$1,'synthetic','synthetic',1,1,'pending_authorization')`, fmt.Sprintf("%064x", n)); err != nil {
+		if _, err := db.Exec(`INSERT INTO aitagent_intake(delivery_key,fingerprint,organization_id,employee_id,actor_id,source_expires_at,state) VALUES($1,$1,'synthetic','synthetic',1,1,'pending_authorization')`, fmt.Sprintf("%064x", n)); err != nil {
 			t.Fatal(err)
 		}
 	}

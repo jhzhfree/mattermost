@@ -44,6 +44,16 @@ func TestSourceRecheckFailsClosedAndRechecksTime(t *testing.T) {
 	clock := func() int64 { return 101 }
 	ctx := context.Background()
 	for name, reader := range map[string]SourceReader{
+		"zero-version": func(context.Context, Binding, string) (SourceRecord, error) {
+			r := observeSource(i, "awaiting_octop_authorization")
+			r.Version = 0
+			return r, nil
+		},
+		"overflow-version": func(context.Context, Binding, string) (SourceRecord, error) {
+			r := observeSource(i, "awaiting_octop_authorization")
+			r.Version = ^uint64(0)
+			return r, nil
+		},
 		"missing-provider": nil,
 		"unavailable": func(context.Context, Binding, string) (SourceRecord, error) {
 			return SourceRecord{}, errors.New("private upstream detail")
@@ -160,5 +170,5 @@ func TestOpaqueIDsAndExplicitStableTargetMapping(t *testing.T) {
 }
 
 func observeSource(i Intent, state string) SourceRecord {
-	return SourceRecord{Commitment: IntentCommitment(i), State: state, ReceiptExpiresAt: i.ReceiptExpiresAt}
+	return SourceRecord{Commitment: IntentCommitment(i), State: state, ReceiptExpiresAt: i.ReceiptExpiresAt, Version: 1}
 }
