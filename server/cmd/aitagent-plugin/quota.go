@@ -27,9 +27,9 @@ const (
 var (
 	errUnavailable = errors.New("Receipt storage is unavailable. No execution or delivery was attempted.")
 	errUncertain   = errors.New("Receipt storage outcome is uncertain. Check the receipt status before submitting again. No execution or delivery was attempted.")
-	errBusy        = errors.New("Intake is busy or a replica is lagging; retry later. No execution or delivery was attempted.")
+	errBusy        = errors.New("Intake is busy or a replica is lagging; retry later. Storage may have committed; reconcile the original receipt and do not automatically submit a new request. No execution or delivery was attempted.")
 	errQuota       = errors.New("Intake rate, pending-request, or retained-receipt limit reached. Retry later or cancel an owned pending request; cancellation does not reset rate or retention limits.")
-	errMissing     = errors.New("Receipt not available for the current user and binding.")
+	errMissing     = errors.New("Receipt not available for the current user and binding. Replica lag or transport failure may hide a committed receipt; this is not proof of absence. Do not automatically submit a new request.")
 	errConflict    = errors.New("This command dispatch conflicts with an existing receipt. No execution or delivery was attempted.")
 	errLegacy      = errors.New("Legacy receipt storage was found. Intake requires a quiesced, verified clean upgrade; no automatic migration or counter reset is supported.")
 	errClock       = errors.New("Intake clock moved backwards relative to shared state. Check node clock synchronization before retrying.")
@@ -56,8 +56,12 @@ func (p *Plugin) nowMillis() int64 {
 // Replica lag may cause a bounded failure, never an unconditional overwrite.
 func (p *Plugin) mutate(change func(*ledger, int64) (*receipt, error)) (*receipt, error) {
 	for attempt := 0; attempt < maxCASAttempts; attempt++ {
+		if p.checkBudget() {
+			return nil, errBusy
+		}
 		raw, appErr := p.API.KVGet(ledgerKey)
 		if appErr != nil || len(raw) > maxLedgerBytes {
+			p.observation().storageErrors.Add(1)
 			return nil, errUnavailable
 		}
 		state := ledger{Version: 2, Receipts: make(map[string]*receipt)}
@@ -66,6 +70,7 @@ func (p *Plugin) mutate(change func(*ledger, int64) (*receipt, error)) (*receipt
 			// upgrade acknowledgement. It cannot prove absence on the primary.
 			keys, listErr := p.API.KVListWithOptions(0, 1, model.PluginKVListOptions{Prefix: "request_"})
 			if listErr != nil {
+				p.observation().storageErrors.Add(1)
 				return nil, errUnavailable
 			}
 			if len(keys) != 0 {
@@ -100,12 +105,18 @@ func (p *Plugin) mutate(change func(*ledger, int64) (*receipt, error)) (*receipt
 		}
 		ok, writeErr := p.API.KVSetWithOptions(ledgerKey, data, model.PluginKVSetOptions{Atomic: true, OldValue: raw})
 		if writeErr != nil {
+			p.observation().uncertainWrites.Add(1)
 			return nil, errUncertain
 		} // may have committed; never compensate or retry blindly
 		if ok {
 			return result, changeErr
 		}
+		p.observation().casNotConfirmed.Add(1)
+		if attempt+1 < maxCASAttempts && !p.waitForRetry(attempt) {
+			return nil, errBusy
+		}
 	}
+	p.observation().casExhausted.Add(1)
 	return nil, errBusy
 }
 

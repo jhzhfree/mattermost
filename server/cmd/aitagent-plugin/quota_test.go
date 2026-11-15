@@ -289,6 +289,8 @@ func TestStorageGateCorruptionAndClock(t *testing.T) {
 	delete(f.values, "request_legacy")
 	for _, raw := range [][]byte{[]byte("invalid"), []byte(`{"version":99}`), []byte(strings.Repeat("x", maxLedgerBytes+1))} {
 		f.values[ledgerKey] = raw
+		p = &Plugin{}
+		p.SetAPI(f) // independent process for each corrupt-state case
 		if text := invoke(t, p, args); !strings.Contains(text, "unavailable") || f.writes != 0 {
 			t.Fatal("unsafe recovery", text)
 		}
@@ -319,6 +321,8 @@ func TestPerProcessInFlightBound(t *testing.T) {
 	blocked := &blockingAPI{fakeAPI: f, entered: make(chan struct{}, 64), release: make(chan struct{})}
 	p.SetAPI(blocked)
 	var wg sync.WaitGroup
+	release := sync.OnceFunc(func() { close(blocked.release) })
+	defer func() { release(); wg.Wait() }()
 	for i := 0; i < 4; i++ {
 		wg.Add(1)
 		go func() { defer wg.Done(); invoke(t, p, args) }()
@@ -327,17 +331,17 @@ func TestPerProcessInFlightBound(t *testing.T) {
 		select {
 		case <-blocked.entered:
 		case <-time.After(5 * time.Second):
-			close(blocked.release)
+			release()
 			wg.Wait()
 			t.Fatal("did not enter storage")
 		}
 	}
-	if text := invoke(t, p, args); !strings.Contains(text, "busy") {
+	if text := invoke(t, p, args); !strings.Contains(text, "overloaded") {
 		t.Error(text)
 	}
-	close(blocked.release)
+	release()
 	wg.Wait()
-	if p.active.Load() != 0 {
+	if p.guard.active.Load() != 0 {
 		t.Fatal("in-flight permit leak")
 	}
 }

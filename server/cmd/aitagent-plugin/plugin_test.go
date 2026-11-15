@@ -222,6 +222,9 @@ func TestConcurrentDispatchReplayCreatesOneReceipt(t *testing.T) {
 		t.Fatal("duplicate dispatch created multiple receipts")
 	}
 	original := readOnlyReceipt(t, f)
+	// Continue on a fresh process so the shared replay check, not the new local limiter, is exercised.
+	p = &Plugin{}
+	p.SetAPI(f)
 	args.Command = "/aitagent request Changed goal"
 	if !strings.Contains(invoke(t, p, args), "conflicts") || readOnlyReceipt(t, f).Goal != original.Goal {
 		t.Fatal("replay changed original receipt")

@@ -8,7 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-	"sync/atomic"
+	"time"
 	"unicode/utf8"
 
 	"github.com/mattermost/mattermost/server/public/model"
@@ -22,12 +22,17 @@ const (
 	privacyNotice = "Do not put secrets or sensitive information in slash commands. Mattermost server audit logs may contain the full command, even when intake is rejected. The 7-day expiry applies only to plugin receipt access; storage cleanup is lazy and may be delayed; audit logs, exports and backups have separate retention."
 )
 
-// Plugin exposes only an explicit command hook. It has no message hooks, public
-// HTTP handler, scheduler, outbound client, or calls to create posts.
+// Plugin exposes explicit commands and a metrics-listener hook. It has no
+// message hooks, user-facing ServeHTTP endpoint, scheduler, outbound client,
+// or calls to create posts.
 type Plugin struct {
 	plugin.MattermostPlugin
-	active atomic.Int32
-	clock  func() int64 // injected only by offline tests
+	guard       processGuard
+	sharedGuard *processGuard
+	budget      *workBudget
+	workClock   func() time.Time
+	retrySleep  func(time.Duration)
+	clock       func() int64 // injected only by offline tests
 }
 
 type configuration struct {
@@ -138,11 +143,35 @@ func (p *Plugin) authorize(c configuration, args *model.CommandArgs) bool {
 }
 
 func (p *Plugin) ExecuteCommand(_ *plugin.Context, args *model.CommandArgs) (*model.CommandResponse, *model.AppError) {
-	if p.active.Add(1) > 4 {
-		p.active.Add(-1)
-		return reply(errBusy.Error())
+	if args == nil || len(args.Command) > 8192 || !model.IsValidId(args.UserId) {
+		return reply(usage)
 	}
-	defer p.active.Add(-1)
+	fields := strings.Fields(args.Command)
+	if len(fields) < 2 || fields[0] != "/aitagent" || (fields[1] != "request" && fields[1] != "status" && fields[1] != "cancel") {
+		return reply(usage)
+	}
+	guard := p.observation()
+	budget, denial := guard.enter(args.UserId, fields[1], p.wallNow)
+	if budget == nil {
+		return reply(denial)
+	}
+	defer guard.leave(budget)
+	worker := &Plugin{clock: p.clock, workClock: p.workClock, retrySleep: p.retrySleep, budget: budget, sharedGuard: guard}
+	worker.SetAPI(&budgetAPI{API: p.API, budget: budget})
+	response, err := worker.executeCommand(args)
+	if budget.expired() {
+		text := budgetMessage
+		if fields[1] == "request" && strings.TrimSpace(args.TriggerId) != "" {
+			text += " Check /aitagent status " + digest(args.TriggerId+"\x00"+args.UserId+"\x00"+args.ChannelId) + "."
+		} else if len(fields) == 3 && validReceiptID(fields[2]) {
+			text += " Check /aitagent status " + fields[2] + "."
+		}
+		return reply(text)
+	}
+	return response, err
+}
+
+func (p *Plugin) executeCommand(args *model.CommandArgs) (*model.CommandResponse, *model.AppError) {
 	if args == nil || len(args.Command) > 8192 {
 		return reply(usage)
 	}
@@ -185,7 +214,7 @@ func (p *Plugin) ExecuteCommand(_ *plugin.Context, args *model.CommandArgs) (*mo
 	}
 	stored, err := p.admit(r, config, args)
 	if err != nil {
-		if err == errUncertain {
+		if err == errUncertain || err == errBusy {
 			return reply(fmt.Sprintf("%s Check /aitagent status %s.", err.Error(), id))
 		}
 		return reply(err.Error())

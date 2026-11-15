@@ -1,4 +1,4 @@
-# AI-TAgent local request intake (0.2.0)
+# AI-TAgent local request intake (0.2.1)
 
 This independent server plugin implements a small collaboration entry point:
 an explicitly allowed human submits a goal for one configured digital employee,
@@ -7,7 +7,7 @@ quotas bound admission rates, pending work, and retained records. It uses the ex
 Mattermost plugin SDK and plugin KV store, without changing Mattermost core.
 
 **This is local intake, not an Octop connector or a 1.0 integration.** There is
-no worker, outbound HTTP client, execution, approval, scheduled task, public HTTP
+no worker, outbound HTTP client, execution, approval, scheduled task, user-facing HTTP
 endpoint, message listener, or channel-post creation. No plugin has been
 installed into a live Mattermost instance as part of implementation validation.
 
@@ -28,7 +28,7 @@ make test
 make bundle
 ```
 
-The Linux amd64 bundle is `dist/ai-tagent-intake-0.2.0-linux-amd64.tar.gz`.
+The Linux amd64 bundle is `dist/ai-tagent-intake-0.2.1-linux-amd64.tar.gz`.
 The manifest requires Mattermost 12.2.0, the repository's development baseline;
 compatibility with older servers is not claimed. The bundle retains the root
 license unchanged. Building a plugin does not grant a commercial feature license.
@@ -182,6 +182,8 @@ configuration was inspected or changed. See also the
   Replay protection is bounded by retention, not permanent.
 - Storage errors return a generic response. An uncertain write includes the
   receipt ID for lookup and never initiates execution or external delivery.
+  A missing/unavailable receipt is not proof that a write did not commit;
+  never automatically create a new dispatch based on a missing replica read.
 
 ## Admission quotas and distributed consistency (0.2)
 
@@ -201,7 +203,8 @@ tombstones, 2 MiB serialized ledger, at most four in-flight commands **per plugi
 process**, and at most eight CAS attempts per ledger operation. There is no
 unbounded retry queue. Saturation returns a private busy/limit response. These
 are admission limits, not a general API/DDoS rate limiter: rejected commands,
-status reads and cancellation do not consume admission rate. Configure existing
+status reads and cancellation do not consume shared admission rate. In 0.2.1
+they consume separate process-local work limits described below. Configure existing
 Mattermost/reverse-proxy ingress protection separately; audits occur upstream.
 
 Cancellation releases the pending slot only. It does not refund the rolling
@@ -240,7 +243,7 @@ Source-level guarantees and limits:
   A newly submitted slash command has a new server trigger. **Dispatch dedupe
   is not business idempotency**, an exactly-once task guarantee, or permanent
   replay protection. Future Octop handoff needs a durable business operation ID.
-- Shared rate windows and expiry use plugin-node wall clocks. Nodes must have
+- Shared admission-rate windows and expiry use plugin-node wall clocks. Nodes must have
   synchronized clocks; backward time relative to the stored high-water mark
   fails closed. Forward jumps cannot be distinguished from elapsed time using
   this API and can shorten a real-time window. No strict wall-clock guarantee
@@ -271,6 +274,95 @@ cannot certify a clean primary or the absence of old writers. If that deployment
 verification cannot be performed, leave `QuotaStorageReady=false`: safe upgrade
 is blocked. No deployment readiness was certified in the offline tests.
 
+## Process-local overload protection (0.2.1)
+
+Before configuration/identity/KV RPCs, each process applies a rolling 60-second
+work limiter to syntactically valid command attempts from a server-supplied user
+ID. Rejected authorization, storage failure and duplicate dispatch attempts also
+consume this local budget. There are no refunds on cancellation or errors.
+
+| Process-local scope | Attempts per rolling 60 seconds |
+| --- | --- |
+| One user: `request`, including duplicate dispatches | 4 |
+| One user: `status` | 6 |
+| One user: `cancel` | 4 |
+| One user: combined command types | 12 |
+| One plugin process: all users/types | 60 |
+
+The limiter keeps at most 60 events and four running command records. It does
+not allocate an unbounded user map or queue. It uses the local monotonic clock
+where available and has no distributed coordination: another node or a process
+restart has a different/empty work budget. These are **not cluster-global read
+or cancellation limits**. The existing shared admission/pending quotas still
+apply independently. Requests rejected by the local limiter do not call plugin
+APIs, but can already have been captured by the server's command audit pipeline.
+
+Successful `status`, same-dispatch replay and repeat cancellation still confirm
+the snapshot with a whole-ledger CAS. This deliberately retains the primary-side
+confirmation from 0.2; the new limits bound the frequency per process, rather
+than silently downgrade status to a confirmed-looking replica read. Whole-ledger
+write amplification and hot-key contention remain scaling limits. Cluster-wide
+ingress budgets and a future authoritative bounded-read/store design must be
+verified before 1.0; adding nodes multiplies the process-local allowance.
+
+### Work budget, RPC cancellation and recovery
+
+Source inspection of `server/public/plugin/client_rpc_generated.go` shows that
+`KVGet`, `KVSetWithOptions` and other APIs call synchronous `net/rpc.Client.Call`.
+Their signatures accept no context/deadline. `plugin.Context` contains metadata,
+not cancellation. `api_timer_layer_generated.go` records elapsed time after the
+API returns; it does not cancel it. The supervisor's start timeout is not a
+per-command deadline. The SDK can log a transport error and return zero values,
+such as `nil,nil` for a read or `false,nil` for CAS. Therefore a missing read is
+not proof of absence, and a false CAS is not proof that the write did not commit.
+
+The plugin enforces a **cooperative two-second work budget**, checking before
+and after each synchronous API call and before further CAS work. A late write
+is treated as uncertain, with the original receipt ID for reconciliation. CAS
+non-confirmation retries wait for exponential delays capped at 100 ms plus
+0–10 ms jitter, at most seven waits/eight attempts; a retry is skipped if its
+wait would exhaust the remaining work budget. API errors are not blindly
+retried. No background goroutine races a timer against an API call, no timed-out
+worker is abandoned, and no slot is released while the issued call is still
+running.
+
+**This is not a hard RPC timeout or a two-second response guarantee.** An issued
+API call can block indefinitely. At most four such command paths can occupy a
+process; new commands fail immediately when the process is full or any running
+command is overdue. When a late call finally returns, its slot is released and
+the process enters a 30-second cooldown. No cleanup worker, self-restart, or
+automatic storage compensation is spawned. If a call never returns, recovery
+requires the managed server/database/transport or a supervised plugin restart;
+the plugin cannot safely provide cancellation on its own. Do not reset its
+ledger as recovery. Authoritative outcome reconciliation is required before
+retrying uncertain work, especially after a restart resets local limits.
+
+### Observability without more API calls
+
+The standard `ServeMetrics` hook exposes a small, fixed set of process-local
+Prometheus-style metrics through the **existing Mattermost metrics listener**,
+at `/plugins/com.aitagent.intake/metrics`, only when that listener/hook is
+available under the deployment's normal configuration and license. This plugin
+does not enable it, add a public `ServeHTTP` endpoint, alter authentication, or
+bypass licensing. Administrators must protect the metrics listener and configure
+scraping through supported deployment controls. Runtime exposure was not tested.
+
+Metrics include `aitagent_process_inflight`, `oldest_work_seconds`,
+`overdue_commands`, `cooldown_seconds`, and counters with the same
+`aitagent_process_` prefix for `commands_started_total`, `rate_rejected_total`,
+`overload_rejected_total`, `budget_exceeded_total`, `cas_not_confirmed_total`,
+`cas_exhausted_total`, `observed_storage_errors_total`, and
+`uncertain_writes_total`. A budget-exceeded counter increments when the command
+returns; overdue gauges expose work that has not returned yet. CAS
+non-confirmation includes false results that may hide transport failures; error
+counters cannot detect failures swallowed by the SDK. Metrics are reset on
+restart and are not a durable audit trail or cluster totals.
+
+Collection uses only bounded local state and atomics, with no plugin API, KV,
+log write, user/organization labels, goal content or receipt IDs. The handler
+remains independent of command API calls in unit tests; actual plugin RPC and
+metrics-listener availability under a real outage remain unverified.
+
 ## Validation and remaining gates
 
 Unit tests exercise the real hook implementation against a strict in-memory
@@ -286,6 +378,14 @@ both before and after commit. They cover all quota scopes, rolling-window
 boundaries, cancellation without rate refunds, tombstone capacity, expiry,
 failed cleanup, backward clocks, local concurrency bounds and malformed state.
 
+Work-protection tests cover concurrent rate accounting, each command type,
+combined limits, process isolation, expired-budget guards, retry jitter bounds,
+late authorization/read/write returns, committed writes with lost transport
+acknowledgements, missing replica reads, and a blocked-API test that retains all
+four slots until the test explicitly releases the calls. The test verifies that
+we do not pretend an uncancellable call has timed out or launch replacement
+workers. All test goroutines are released/joined; no live server is contacted.
+
 An optional `python3 tests/postgres_cas.py` check uses an already-cached official
 `postgres:15` image on the managed Docker socket. It creates a disposable
 network-disabled container with no host ports and synthetic data only, tests
@@ -300,3 +400,12 @@ define a durable handoff/outbox with reconciliation; add approval invalidation,
 separate human/automatic execution evidence, deployment-level request rate limits, retention/deletion
 operations and an external audit policy. Do not treat a local receipt as an
 approved, queued, executed, or externally delivered Octop task.
+
+Explicit 1.0 blockers also include end-to-end hard timeout/recovery behavior in
+the supported plugin runtime, cluster-wide overload controls, hot-key/write
+amplification assessment, live metrics routing, authoritative reconciliation of
+uncertain/missing receipts, verified clock behavior, and a tested quiesced
+upgrade path. `QuotaStorageReady` remains an operator declaration, not migration
+proof. A full 128-record ledger can stop intake until retention expires; no
+successful operations or an inactive plugin can delay physical goal cleanup.
+None of these limits is waived by the local work limiter or metrics endpoint.
