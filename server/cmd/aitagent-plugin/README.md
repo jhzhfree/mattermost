@@ -1,4 +1,110 @@
-# AI-TAgent local request intake (0.2.3)
+# AI-TAgent local request intake (0.2.4)
+
+## Source expiry, revocation and ID compatibility (0.2.4)
+
+Independent review found two **pre-wiring blockers** in the 0.2.3 offline proof:
+its lifetime could extend beyond the source receipt's expiry, and a signature
+alone remained valid after source cancellation. There is no deployed receiver or
+runtime signer here; this is not a claim of an exploited or live integration flaw.
+
+The proposed proof is now **version 2**, with signing domain
+`mattermost-octop-intent-proof/v2\0`. It carries the original receipt's
+`receipt_expires_at` in Unix milliseconds, copied from the source receipt and
+included in the signed intent and conflict fingerprint. Both signer and verifier
+require `proof.expires <= floor(receipt_expires_at / 1000)` as well as the existing
+120-second maximum. They reject an excessive lifetime rather than silently
+extend/clamp it; subsecond expiry rounds down conservatively. The receiver rejects
+old v1 proofs; no permissive fallback or persistent ledger migration is added.
+The receipt delivery-key domain remains v1 so changing the proof format does not
+invent another identity for the same receipt. Changed source expiry or mapping
+must conflict with any older inbox fingerprint, not reset deduplication.
+
+### Signature verification is not current-source authorization
+
+`Verify` remains a pure signature/binding/time check. **It still cannot detect
+cancellation** and is never sufficient for intake or execution. New offline
+`VerifyWithSource` requires an explicit trusted `SourceReader`, invoked after
+proof validation and on every retry/duplicate. It compares the returned current
+intent, including exact binding, receipt, goal and source expiry, and accepts
+only `awaiting_octop_authorization`. Missing/error/unknown/cancelled/changed
+records fail closed with a fixed error. It checks the proof again after the
+lookup, rejecting lookup-time expiry, clock rewind or a cancelled context. There
+is no installed reader, endpoint, secret provider or network path in this plugin.
+
+A future reader must authenticate the source service and perform a primary-
+confirmed lookup scoped by instance/binding/receipt, rechecking live source user,
+Bot, membership, config and cancellation. It must reconstruct the record from
+trusted state, not echo signed claims or return a cached/replica observation.
+The adapter must impose and honor bounded deadlines; the Go seam cannot terminate
+a callback that ignores context and creates no replacement timeout goroutines.
+The receiver must separately recheck current Octop account/organization/Agent
+access and trust-policy revocation. Policy snapshots and signatures cannot prove
+those permissions are still current.
+
+**A fresh read is still not a distributed cancellation lock.** Cancellation after
+the lookup can race receiver commit. Before runtime wiring, define an auditable
+source claim/cancellation state machine (including lost acknowledgements and
+crash recovery), or a documented pending-intent cancellation protocol with a
+fresh pre-execution check. No claim/lease/receipt-version CAS or zero-window
+revocation guarantee is implemented here. Until that protocol is implemented and
+tested, proof candidates must not trigger execution or be treated as task intake.
+
+Tests use the actual local command fixture to cancel a previously signed receipt:
+`Verify` still succeeds while `VerifyWithSource` rejects it. Additional cases
+cover overlong signed proof expiry, conservative millisecond boundaries, missing
+providers, failures, changed source content/expiry, repeated source checks and
+expiry/cancellation during the lookup. These are offline checks, not evidence of
+real source authentication or current permissions across two services.
+
+### Explicit stable machine-ID mapping and legacy configuration
+
+Source organization/employee fields now accept nonblank, valid UTF-8 opaque IDs
+up to **128 bytes**, preserving the existing configuration's Unicode, punctuation
+and significant whitespace. No trim, slug, case folding or Unicode normalization
+occurs. Invalid UTF-8 cannot be represented losslessly by this JSON format and is
+rejected; it is not automatically repaired. Two visually identical normalized
+forms are different IDs. These strings are never interpreted as paths or URLs.
+Instance/audience/key aliases keep the bounded ASCII-token format; Mattermost IDs
+keep their 26-character stable-ID format.
+
+The receiver-owned policy must explicitly map the exact source binding to stable
+Octop **organization ID, worker ID and actor ID**. No display-name lookup, automatic
+provisioning, or assumption that legacy labels equal Octop database IDs is allowed.
+The new target IDs are required and returned only from trusted policy, never from
+proof claims. All three participate in the conflict fingerprint; remapping cannot
+silently reattribute an existing receipt. Future deployment provisioning must
+verify those targets exist and are correctly related, version/revoke mappings,
+and check live access transactionally. This code does not provide that registry or
+resolve its targets. Tests preserve Unicode legacy configuration end to end and
+reject missing mapping, normalization aliases and oversized IDs.
+
+### Public cross-language vectors and remaining transport/inbox gates
+
+`internal/handoff/testdata/vectors.json` contains ten **synthetic public** vectors,
+with public keys only. `go test ./...` and
+`python3 internal/handoff/testdata/check_vectors.py` verify the same proofs and
+delivery/conflict hashes. The Python standard-library reference uses local
+OpenSSL Ed25519 verification (Python 3 and OpenSSL with Ed25519 support required).
+`make test` runs both. Vectors cover Unicode/HTML/line-separator escaping, expiry,
+wrong binding, revoked trust, missing mapping, tampering and old protocol rejection.
+They are not production credentials and do not connect to any service.
+
+This is a tested **ordered Go JSON representation**, not an adopted canonical
+JSON standard, JCS, JWT or a production Python/Octop verifier. The Python program
+is a vector checker, not a hardened ingress parser. Broader differential/fuzz
+testing and an agreed, versioned protocol are still required. The base64 payload
+is decodable plaintext, **not encryption**: authenticated TLS, precise destination
+policy, secret/executor isolation and restricted inbox storage/retention must be
+implemented before transport. Never log proof bodies, goals or credential data.
+
+Verification has no persistent replay prevention. A production receiver needs a
+unique delivery key plus conflict fingerprint, pending-intent record and audit in
+one durable transaction, with current authorization and quota checks. Verify
+source/trust state before recognizing duplicates; unknown commit outcomes require
+reconciliation, not a new request. Define tombstone retention and task-level
+business idempotency separately. None of those persistent receiver guarantees,
+network protections or runtime execution capabilities are delivered by this
+offline slice. All 0.2.2/0.2.3 blockers below continue to apply.
 
 ## Offline request-proof boundary added in 0.2.3
 
@@ -121,7 +227,7 @@ make test
 make bundle
 ```
 
-The Linux amd64 bundle is `dist/ai-tagent-intake-0.2.3-linux-amd64.tar.gz`.
+The Linux amd64 bundle is `dist/ai-tagent-intake-0.2.4-linux-amd64.tar.gz`.
 The manifest requires Mattermost 12.2.0, the repository's development baseline;
 compatibility with older servers is not claimed. The bundle retains the root
 license unchanged. Building a plugin does not grant a commercial feature license.

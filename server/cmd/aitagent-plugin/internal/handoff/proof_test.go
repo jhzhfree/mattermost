@@ -18,8 +18,8 @@ func fixture(t testing.TB) (Intent, Policy, ed25519.PrivateKey) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	i := Intent{Binding: Binding{"mm-test", "octop-test", "org", "employee", strings.Repeat("u", 26), strings.Repeat("t", 26), strings.Repeat("c", 26), strings.Repeat("b", 26)}, Receipt: strings.Repeat("a", 64), Goal: "Check health; <untrusted> 执行文本不能授权", Mode: "user_requested"}
-	return i, Policy{Enabled: true, KeyID: "test-key", PublicKey: pub, Binding: i.Binding, OctopActorID: 9}, priv
+	i := Intent{Binding: Binding{"mm-test", "octop-test", "org", "employee", strings.Repeat("u", 26), strings.Repeat("t", 26), strings.Repeat("c", 26), strings.Repeat("b", 26)}, Receipt: strings.Repeat("a", 64), ReceiptExpiresAt: 180000, Goal: "Check health; <untrusted> 执行文本不能授权", Mode: "user_requested"}
+	return i, Policy{Enabled: true, KeyID: "test-key", PublicKey: pub, Binding: i.Binding, OctopActorID: 9, OctopOrganizationID: "target-org", OctopEmployeeID: "target-worker"}, priv
 }
 
 func TestStrictProofAndBinding(t *testing.T) {
@@ -70,9 +70,9 @@ func TestStrictProofAndBinding(t *testing.T) {
 
 func TestSignedMalformedClaimsRejected(t *testing.T) {
 	i, p, key := fixture(t)
-	base := claims{1, p.KeyID, 100, 160, i}
+	base := claims{2, p.KeyID, 100, 160, i}
 	for name, change := range map[string]func(*claims){
-		"version": func(c *claims) { c.Version = 2 }, "lifetime": func(c *claims) { c.Expires = 221 },
+		"version": func(c *claims) { c.Version = 1 }, "lifetime": func(c *claims) { c.Expires = 221 },
 		"bot-actor": func(c *claims) { c.Intent.Binding.User = c.Intent.Binding.Bot },
 		"automatic": func(c *claims) { c.Intent.Mode = "scheduled" }, "empty": func(c *claims) { c.Intent.Goal = "  " },
 		"long-goal": func(c *claims) { c.Intent.Goal = strings.Repeat("界", 2001) },

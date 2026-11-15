@@ -21,6 +21,6 @@ func handoffDraft(r *receipt, c configuration, args *model.CommandArgs, instance
 	return handoff.Intent{
 		Binding: handoff.Binding{Instance: instance, Audience: audience, Organization: r.OrganizationID,
 			Employee: r.EmployeeID, User: r.ActorUserID, Team: r.TeamID, Channel: r.ChannelID, Bot: r.BotUserID},
-		Receipt: r.ID, Goal: r.Goal, Mode: r.OperationMode,
+		Receipt: r.ID, ReceiptExpiresAt: r.ExpiresAt, Goal: r.Goal, Mode: r.OperationMode,
 	}, nil
 }
