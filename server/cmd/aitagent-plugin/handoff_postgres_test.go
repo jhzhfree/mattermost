@@ -25,7 +25,7 @@ func TestOfflinePGSourceToPendingInbox(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	_, err = db.Exec(`DROP TABLE IF EXISTS aitagent_intake_audit,aitagent_intake,aitagent_test_receiver CASCADE;` + handoff.OfflineInboxSchema + `
+	_, err = db.Exec(`DROP TABLE IF EXISTS aitagent_capacity_guard,aitagent_intake_audit,aitagent_intake,aitagent_test_receiver CASCADE;` + handoff.OfflineInboxSchema + `
  CREATE TABLE aitagent_test_receiver(actor bigint,org text,worker text,key_id text,enabled boolean);
  INSERT INTO aitagent_test_receiver VALUES(42,'target-org','target-worker','test-key',true);`)
 	if err != nil {

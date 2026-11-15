@@ -1,4 +1,101 @@
-# AI-TAgent local request intake (0.2.6)
+# AI-TAgent local request intake (0.2.7)
+
+## Offline inbox lifecycle and restricted database roles (0.2.7)
+
+This revision extends the **isolated fixture**, not the live plugin integration.
+Execution and outbound networking remain disabled and unwired. `Lifecycle.Run`
+is actually called by the disposable PostgreSQL tests; there is no installed
+scheduler, production migration, real receiver identity adapter or cleanup job.
+
+### Terminal states, retention and replay boundary
+
+`cancelled` and `expired` are terminal non-executing states. Local cancellation
+records the database time and session role; maintenance marks source-expired
+records `expired`, appending the matching event in the same transaction. Expiry
+is not successful completion, proof of remote cancellation or an execution result.
+All other states, including `execution_observed`, remain non-executable historical
+observations. The eighth revision is reserved for a terminal transition.
+
+The maintenance capability takes no caller-supplied cutoff, identity or SQL.
+Each call processes at most 32 records under bounded SQL waits. Compaction requires
+**both** source expiry and terminal database time to be at least 30 days old.
+It checks complete sequential audit history, then atomically stores a SHA-256
+summary, event count, final operation ID, database timestamp and maintenance
+session role before deleting detailed audit events. The summary is not a backup
+of those events and cannot reconstruct them. This fixed fixture retention policy
+requires an explicit production retention/privacy review; it is not a legal
+retention recommendation. A database owner can alter history and the summary:
+this is not owner-resistant or externally anchored tamper evidence.
+
+Compacted rows retain the original primary key, fingerprint and target metadata
+permanently. No goal, proof or secret is stored. Their 128-slot **unarchived**
+capacity is released, but the identity tombstone still rejects replay, including
+a newly signed proof with an extended expiry. There is a separate 4096-identity
+registry limit which fails closed. This fixes the 128-record permanent stall in
+the offline kernel, not unlimited retention or throughput. Registry partitioning,
+capacity operations and approved identity archival are still 1.0 blockers. Never
+delete tombstones merely to admit retries. Without scheduled maintenance,
+retention and capacity release are delayed indefinitely. The Mattermost KV ledger
+and server audit retention remain independent and are unchanged by this feature.
+
+Intake and maintenance serialize capacity accounting on one singleton guard row;
+state changes use row locks and expected revisions. This is not a fair tenant
+queue. Detailed audit appends and state changes must commit together, enforced by
+deferred constraints. Missing history aborts compaction. A commit error returns
+`commit_unknown` with no claimed count: reconcile the original identity using the
+independently authorized `Inspect`, which now returns either full events or the
+terminal archive summary from one repeatable-read snapshot. Compacted summaries
+preserve only the last operation ID, not per-operation reconciliation forever.
+Never infer non-delivery from an unavailable read or create a new receipt to retry.
+
+### What the role tests establish
+
+The network-isolated PostgreSQL fixture connects directly as three distinct
+non-superuser, non-owner roles: application, reader and maintenance. The owner is
+NOLOGIN; none of those roles may assume it. Application grants are column-scoped;
+identity changes, deleting/truncating audit, changing grants and DDL are denied.
+The reader can inspect but cannot mutate; maintenance has only two narrowly scoped
+SECURITY DEFINER function capabilities and no direct table access. Functions have
+fixed search paths, and PUBLIC cannot create objects in the fixture schema.
+Database triggers enforce terminal fencing and matching audit events. The test-only
+authorization helper is a synthetic grant check, **not** a real caller authenticator.
+These roles are scoped to this kernel; production tenant/RLS isolation, connection
+credentials, owner controls and real Octop permissions still require design and
+validation. Administrator connections only install/reset schemas and inject aged
+records, audit faults and large synthetic capacity fixtures. Earlier state tests
+still use the administrator and do not establish least-privilege operation.
+
+### Validation of this phase
+
+`make test` passes race-enabled package tests and 10 Go/Python/OpenSSL vectors.
+`python3 tests/postgres_inbox.py --go /workspace/toolchains/go/bin/go` passes 20
+isolated PostgreSQL cases (15 existing, 5 lifecycle cases), including direct
+restricted-role sessions, 128-slot reuse without identity reuse, separate registry
+exhaustion, retention on both clocks, concurrent maintenance, lock timeout, event
+failure rollback, corrupt-history rejection and lost commit acknowledgements for
+expiry and compaction. The container uses cached official PostgreSQL 15.20 with
+no network or published ports and is removed afterward. Tagged vet and the Linux
+plugin bundle build also pass. These are synthetic source/SQL tests, not a running
+Mattermost-to-Octop deployment, production permission acceptance or crash/restore
+and replica-failover validation.
+
+### Cancellation race and sender outbox still block 1.0
+
+A source can cancel immediately after the last remote check; a receiver transaction
+cannot atomically commit with Mattermost KV. No lifecycle state removes this race
+or grants execution. A real action must repeat current source/version/expiry,
+target and local authorization checks at its execution boundary, with an explicit
+policy for cancellation during an irreversible action. No distributed atomicity
+or exactly-once guarantee is claimed.
+
+A future sender outbox must durably retain the original delivery identity and
+fingerprint before delivery, use authenticated reconciliation for unknown commits,
+and recover cancellation propagation without deleting or inventing new identities.
+The current KV request ledger is not that outbox. Durable cancellation delivery,
+receiver authentication, secure transport, restore epochs, real two-service tests,
+archival of outbox reconciliation history and safe execution remain unimplemented.
+The following sections describe earlier phases; their original 128-retained-row
+and administrator-only fixture limitations are superseded only where stated above.
 
 ## Versioned review, local cancellation and independent reconciliation (0.2.6)
 

@@ -39,7 +39,7 @@ func openOfflineDB(t *testing.T) *sql.DB {
 }
 func resetOfflineDB(t *testing.T) *sql.DB {
 	db := openOfflineDB(t)
-	if _, err := db.Exec(`DROP TABLE IF EXISTS aitagent_intake_audit,aitagent_intake,aitagent_test_grants CASCADE;` + OfflineInboxSchema + `
+	if _, err := db.Exec(`DROP FUNCTION IF EXISTS aitagent_guard_row(),aitagent_require_audit(),aitagent_validate_event() CASCADE; DROP TABLE IF EXISTS aitagent_capacity_guard,aitagent_intake_audit,aitagent_intake,aitagent_test_grants CASCADE;` + OfflineInboxSchema + `
  CREATE TABLE aitagent_test_grants(org text,worker text,actor bigint,key_id text,active boolean,PRIMARY KEY(org,worker,actor));
  INSERT INTO aitagent_test_grants VALUES('target-org','target-worker',9,'test-key',true);`); err != nil {
 		t.Fatal(err)
@@ -236,7 +236,19 @@ func TestOfflinePGAuditRollbackCommitUnknownAndLimits(t *testing.T) {
 	countRows(t, db, 1)
 	// A retained cap is deliberately not reset by source expiry or cancellation.
 	for n := 0; n < 127; n++ {
-		if _, err := db.Exec(`INSERT INTO aitagent_intake(delivery_key,fingerprint,organization_id,employee_id,actor_id,source_expires_at,state) VALUES($1,$1,'synthetic','synthetic',1,1,'pending_authorization')`, fmt.Sprintf("%064x", n)); err != nil {
+		tx, err := db.Begin()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec(`INSERT INTO aitagent_intake(delivery_key,fingerprint,organization_id,employee_id,actor_id,source_expires_at,state) VALUES($1,$1,'synthetic','synthetic',1,1,'pending_authorization')`, fmt.Sprintf("%064x", n)); err != nil {
+			tx.Rollback()
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec(`INSERT INTO aitagent_intake_audit(delivery_key,fingerprint,action) VALUES($1,$1,'pending_intake_recorded')`, fmt.Sprintf("%064x", n)); err != nil {
+			tx.Rollback()
+			t.Fatal(err)
+		}
+		if err := tx.Commit(); err != nil {
 			t.Fatal(err)
 		}
 	}

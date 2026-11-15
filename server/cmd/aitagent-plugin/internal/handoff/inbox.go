@@ -18,13 +18,14 @@ var OfflineInboxSchema string
 type IntakeOutcome string
 
 const (
-	IntakeRejected    IntakeOutcome = "rejected"
-	IntakeUnavailable IntakeOutcome = "unavailable"
-	IntakeUnknown     IntakeOutcome = "commit_unknown"
-	IntakeConflict    IntakeOutcome = "conflict"
-	IntakeFull        IntakeOutcome = "retained_capacity_reached"
-	IntakePending     IntakeOutcome = "pending_authorization"
-	IntakeDuplicate   IntakeOutcome = "duplicate_retained_intake"
+	IntakeRejected     IntakeOutcome = "rejected"
+	IntakeUnavailable  IntakeOutcome = "unavailable"
+	IntakeUnknown      IntakeOutcome = "commit_unknown"
+	IntakeConflict     IntakeOutcome = "conflict"
+	IntakeFull         IntakeOutcome = "unarchived_capacity_reached"
+	IntakeRegistryFull IntakeOutcome = "identity_registry_capacity_reached"
+	IntakePending      IntakeOutcome = "pending_authorization"
+	IntakeDuplicate    IntakeOutcome = "duplicate_retained_intake"
 )
 
 // ReceiverAuthorizer must lock/recheck current receiver trust, mapping, account,
@@ -93,10 +94,11 @@ func (s *Inbox) Accept(ctx context.Context, proof []byte, policy Policy, now fun
 	if err = s.authorize(ctx, tx, policy, candidate); err != nil {
 		return IntakeRejected
 	}
-	// One table lock deliberately serializes this small offline inbox, including
-	// the retained-row cap. It is not a scalable or tenant-fair queue. Bounded SQL
+	// One singleton row lock serializes intake and maintenance, including
+	// the unarchived and permanent identity caps. It is not a scalable or tenant-fair queue. Bounded SQL
 	// waits fail closed; no expired record is deleted to reopen replay admission.
-	if _, err = tx.ExecContext(ctx, "LOCK TABLE aitagent_intake IN SHARE ROW EXCLUSIVE MODE"); err != nil {
+	var guard bool
+	if err = tx.QueryRowContext(ctx, "SELECT id FROM aitagent_capacity_guard WHERE id=true FOR UPDATE").Scan(&guard); err != nil || !guard {
 		return IntakeUnavailable
 	}
 	if !current() {
@@ -109,7 +111,7 @@ func (s *Inbox) Accept(ctx context.Context, proof []byte, policy Policy, now fun
 		if !current() {
 			return IntakeRejected
 		}
-		if state == "cancelled" || observation.Version < uint64(sourceVersion) {
+		if state == "cancelled" || state == "expired" || observation.Version < uint64(sourceVersion) {
 			return IntakeRejected
 		}
 		if fingerprint != candidate.Fingerprint {
@@ -120,9 +122,12 @@ func (s *Inbox) Accept(ctx context.Context, proof []byte, policy Policy, now fun
 	if err != sql.ErrNoRows {
 		return IntakeUnavailable
 	}
-	var count int
-	if err = tx.QueryRowContext(ctx, "SELECT count(*) FROM aitagent_intake").Scan(&count); err != nil {
+	var count, total int
+	if err = tx.QueryRowContext(ctx, "SELECT count(*) FILTER (WHERE archived_at IS NULL), count(*) FROM aitagent_intake").Scan(&count, &total); err != nil {
 		return IntakeUnavailable
+	}
+	if total >= 4096 {
+		return IntakeRegistryFull
 	}
 	if count >= 128 {
 		return IntakeFull

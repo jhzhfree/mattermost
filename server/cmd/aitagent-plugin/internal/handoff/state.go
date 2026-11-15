@@ -29,15 +29,24 @@ const (
 	ReviewUnavailable ReviewOutcome = "unavailable_no_execution"
 	ReviewUnknown     ReviewOutcome = "commit_unknown_no_execution"
 	ReviewCancelled   ReviewOutcome = "cancelled"
+	ReviewExpired     ReviewOutcome = "expired"
 )
 
 // StoredState is historical metadata only. None of its states is a runnable
 // permission, approval, lease, or token. Inspect is independent of source expiry.
 type StoredState struct {
-	State         string
-	Revision      int64
-	SourceVersion uint64
-	Events        []StoredEvent // populated only by independently authorized Inspect
+	State               string
+	Revision            int64
+	SourceVersion       uint64
+	Archived            bool
+	ArchiveDigest       string
+	ArchiveEventCount   int
+	ArchivedBy          string
+	ArchivedAt          time.Time
+	TerminalOperationID string
+	TerminalAt          time.Time
+	TerminalBy          string
+	Events              []StoredEvent // populated only by independently authorized Inspect
 }
 type StoredEvent struct {
 	Action      string
@@ -91,6 +100,12 @@ func loadState(ctx context.Context, tx *sql.Tx, key string) (Candidate, StoredSt
 	err := tx.QueryRowContext(ctx, `SELECT fingerprint,organization_id,employee_id,actor_id,source_expires_at,state,revision,source_version FROM aitagent_intake WHERE delivery_key=$1 FOR UPDATE`, key).Scan(&c.Fingerprint, &c.OctopOrganizationID, &c.OctopEmployeeID, &c.OctopActorID, &c.Intent.ReceiptExpiresAt, &state.State, &state.Revision, &state.SourceVersion)
 	return c, state, err
 }
+func loadSnapshot(ctx context.Context, tx *sql.Tx, key string) (Candidate, StoredState, error) {
+	c := Candidate{DeliveryKey: key}
+	var state StoredState
+	err := tx.QueryRowContext(ctx, `SELECT fingerprint,organization_id,employee_id,actor_id,source_expires_at,state,revision,source_version FROM aitagent_intake WHERE delivery_key=$1`, key).Scan(&c.Fingerprint, &c.OctopOrganizationID, &c.OctopEmployeeID, &c.OctopActorID, &c.Intent.ReceiptExpiresAt, &state.State, &state.Revision, &state.SourceVersion)
+	return c, state, err
+}
 func targetMatches(c Candidate, p Policy) bool {
 	return c.OctopOrganizationID == p.OctopOrganizationID && c.OctopEmployeeID == p.OctopEmployeeID && c.OctopActorID == p.OctopActorID
 }
@@ -98,7 +113,7 @@ func targetMatches(c Candidate, p Policy) bool {
 // storeState writes state/version and its audit atomically. Observation history
 // is bounded at revision 7, reserving revision 8 for terminal local cancellation.
 func storeState(ctx context.Context, tx *sql.Tx, c Candidate, old StoredState, next string, sourceVersion uint64, op string) error {
-	result, err := tx.ExecContext(ctx, `UPDATE aitagent_intake SET state=$1,revision=revision+1,source_version=$2 WHERE delivery_key=$3 AND revision=$4 AND state<>'cancelled'`, next, int64(sourceVersion), c.DeliveryKey, old.Revision)
+	result, err := tx.ExecContext(ctx, `UPDATE aitagent_intake SET state=$1,revision=revision+1,source_version=$2,terminal_at=CASE WHEN $1='cancelled' THEN clock_timestamp() ELSE terminal_at END,terminal_by=CASE WHEN $1='cancelled' THEN session_user ELSE terminal_by END WHERE delivery_key=$3 AND revision=$4 AND state NOT IN ('cancelled','expired')`, next, int64(sourceVersion), c.DeliveryKey, old.Revision)
 	if err != nil {
 		return err
 	}
@@ -163,7 +178,7 @@ func (s *StateMachine) Review(ctx context.Context, proof []byte, p Policy, expec
 	if s.authorize(ctx, tx, p, candidate, action) != nil {
 		return ReviewDenied
 	}
-	if state.State == "cancelled" {
+	if state.State == "cancelled" || state.State == "expired" {
 		return ReviewDenied
 	}
 	// Failure never returns an observation. When possible persist a blocked state
@@ -229,17 +244,42 @@ func (s *StateMachine) Inspect(ctx context.Context, key string, p Policy) (Store
 	}
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	tx, err := s.transaction(ctx)
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead})
 	if err != nil {
 		return StoredState{}, ReviewUnavailable
 	}
 	defer tx.Rollback()
-	c, state, err := loadState(ctx, tx, key)
+	if _, err := tx.ExecContext(ctx, "SET LOCAL lock_timeout='250ms'; SET LOCAL statement_timeout='1000ms'"); err != nil {
+		return StoredState{}, ReviewUnavailable
+	}
+	c, state, err := loadSnapshot(ctx, tx, key)
 	if err != nil {
 		return StoredState{}, ReviewUnavailable
 	}
 	if !targetMatches(c, p) || s.authorize(ctx, tx, p, c, ReviewInspect) != nil {
 		return StoredState{}, ReviewDenied
+	}
+	var at, terminalAt sql.NullTime
+	var by, digest, op, terminalBy sql.NullString
+	var count sql.NullInt64
+	if err := tx.QueryRowContext(ctx, "SELECT archived_at,archived_by,archive_digest,archive_event_count,archive_terminal_operation_id,terminal_at,terminal_by FROM aitagent_intake WHERE delivery_key=$1", key).Scan(&at, &by, &digest, &count, &op, &terminalAt, &terminalBy); err != nil {
+		return StoredState{}, ReviewUnavailable
+	}
+	if terminalAt.Valid {
+		state.TerminalAt = terminalAt.Time
+		state.TerminalBy = terminalBy.String
+	}
+	if at.Valid {
+		if (state.State != "cancelled" && state.State != "expired") || !by.Valid || !validKey(digest.String) || count.Int64 != state.Revision || !op.Valid {
+			return StoredState{}, ReviewUnavailable
+		}
+		state.Archived = true
+		state.ArchivedAt = at.Time
+		state.ArchivedBy = by.String
+		state.ArchiveDigest = digest.String
+		state.ArchiveEventCount = int(count.Int64)
+		state.TerminalOperationID = op.String
+		return state, ReviewRecorded
 	}
 	rows, err := tx.QueryContext(ctx, `SELECT action,revision,operation_id,fingerprint FROM aitagent_intake_audit WHERE delivery_key=$1 ORDER BY revision LIMIT 9`, key)
 	if err != nil {
@@ -283,6 +323,9 @@ func (s *StateMachine) Cancel(ctx context.Context, key string, p Policy, expecte
 	}
 	if state.State == "cancelled" {
 		return ReviewCancelled
+	}
+	if state.State == "expired" {
+		return ReviewExpired
 	}
 	if state.Revision != expectedRevision {
 		return ReviewConflict
