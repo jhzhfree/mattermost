@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"os"
@@ -59,13 +60,18 @@ func (f *fakeAPI) RegisterCommand(command *model.Command) error {
 func (f *fakeAPI) KVSetWithOptions(key string, value []byte, options model.PluginKVSetOptions) (bool, *model.AppError) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if !options.Atomic || options.OldValue != nil || options.ExpireInSeconds != receiptTTL {
-		panic("receipts must use atomic creation and bounded retention")
+	if !options.Atomic || options.ExpireInSeconds != 0 || key != ledgerKey {
+		panic("ledger must use a single non-expiring atomic row")
 	}
 	if f.writeErr != nil {
 		return false, f.writeErr
 	}
-	if _, exists := f.values[key]; exists {
+	current, exists := f.values[key]
+	if options.OldValue == nil {
+		if exists {
+			return false, nil
+		}
+	} else if !exists || !bytes.Equal(current, options.OldValue) {
 		return false, nil
 	}
 	f.values[key] = append([]byte(nil), value...)
@@ -81,7 +87,7 @@ func (f *fakeAPI) KVGet(key string) ([]byte, *model.AppError) {
 func fixture() (*Plugin, *fakeAPI, *model.CommandArgs) {
 	user, bot, team, channel := model.NewId(), model.NewId(), model.NewId(), model.NewId()
 	f := &fakeAPI{
-		config:  configuration{Enabled: true, OrganizationID: "test-org", EmployeeID: "ops-employee", BotUserID: bot, TeamID: team, ChannelID: channel, AllowedRequesterIDs: user},
+		config:  configuration{Enabled: true, QuotaStorageReady: true, OrganizationID: "test-org", EmployeeID: "ops-employee", BotUserID: bot, TeamID: team, ChannelID: channel, AllowedRequesterIDs: user},
 		users:   map[string]*model.User{user: {Id: user}, bot: {Id: bot, IsBot: true}},
 		channel: &model.Channel{Id: channel, TeamId: team}, members: map[string]bool{user: true, bot: true},
 		permission: true, values: make(map[string][]byte),
@@ -106,19 +112,41 @@ func invoke(t *testing.T, p *Plugin, args *model.CommandArgs) string {
 	return response.Text
 }
 
+func readLedger(t *testing.T, f *fakeAPI) ledger {
+	t.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var s ledger
+	if err := json.Unmarshal(f.values[ledgerKey], &s); err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
 func readOnlyReceipt(t *testing.T, f *fakeAPI) receipt {
 	t.Helper()
-	if len(f.values) != 1 {
-		t.Fatalf("expected one receipt, got %d", len(f.values))
+	s := readLedger(t, f)
+	if len(s.Receipts) != 1 {
+		t.Fatalf("expected one receipt, got %d", len(s.Receipts))
 	}
-	for _, data := range f.values {
-		var r receipt
-		if err := json.Unmarshal(data, &r); err != nil {
-			t.Fatal(err)
-		}
-		return r
+	for _, r := range s.Receipts {
+		return *r
 	}
 	panic("unreachable")
+}
+
+func (f *fakeAPI) KVListWithOptions(page, perPage int, options model.PluginKVListOptions) ([]string, *model.AppError) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if page != 0 || perPage != 1 || options.Prefix != "request_" {
+		panic("unexpected legacy scan")
+	}
+	for key := range f.values {
+		if strings.HasPrefix(key, options.Prefix) {
+			return []string{key}, nil
+		}
+	}
+	return nil, f.readErr
 }
 
 func TestRequestAndStatusPreserveTrustedIdentities(t *testing.T) {
@@ -132,7 +160,7 @@ func TestRequestAndStatusPreserveTrustedIdentities(t *testing.T) {
 		r.State != receiptState || r.Goal != goal || r.GoalHash != digest(goal) || r.ExpiresAt-r.CreatedAt != receiptTTL*1000 {
 		t.Fatalf("incorrect trusted receipt: %+v", r)
 	}
-	if !strings.Contains(text, r.ID) || strings.Contains(text, goal) || strings.Contains(string(f.values["request_"+r.ID]), args.TriggerId) {
+	if !strings.Contains(text, r.ID) || strings.Contains(text, goal) || strings.Contains(string(f.values[ledgerKey]), args.TriggerId) {
 		t.Fatal("response must provide receipt ID without reflecting goal or storing trigger")
 	}
 	args.Command = "/aitagent status " + r.ID
@@ -190,8 +218,8 @@ func TestConcurrentDispatchReplayCreatesOneReceipt(t *testing.T) {
 		go func() { defer wg.Done(); invoke(t, p, args) }()
 	}
 	wg.Wait()
-	if f.writes != 1 {
-		t.Fatalf("duplicate dispatch wrote %d receipts", f.writes)
+	if len(readLedger(t, f).Receipts) != 1 {
+		t.Fatal("duplicate dispatch created multiple receipts")
 	}
 	original := readOnlyReceipt(t, f)
 	args.Command = "/aitagent request Changed goal"
@@ -200,7 +228,7 @@ func TestConcurrentDispatchReplayCreatesOneReceipt(t *testing.T) {
 	}
 	args.TriggerId = "new-server-trigger"
 	invoke(t, p, args)
-	if f.writes != 2 {
+	if len(readLedger(t, f).Receipts) != 2 {
 		t.Fatal("new submission should get a separate receipt")
 	}
 }
@@ -250,11 +278,13 @@ func TestStorageFailureAndExpiry(t *testing.T) {
 	}
 	f.readErr = nil
 	r.ExpiresAt = 1
-	f.values["request_"+r.ID], _ = json.Marshal(r)
+	state := readLedger(t, f)
+	state.Receipts[r.ID] = &r
+	f.values[ledgerKey], _ = json.Marshal(state)
 	if text := invoke(t, p, args); strings.Contains(text, receiptState) {
 		t.Fatal("expired receipt returned")
 	}
-	f.values["request_"+r.ID] = []byte("malformed")
+	f.values[ledgerKey] = []byte("malformed")
 	if text := invoke(t, p, args); !strings.Contains(text, "unavailable") {
 		t.Fatal(text)
 	}

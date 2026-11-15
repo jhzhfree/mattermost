@@ -1,8 +1,9 @@
-# AI-TAgent local request intake (0.1.1)
+# AI-TAgent local request intake (0.2.0)
 
 This independent server plugin implements a small collaboration entry point:
 an explicitly allowed human submits a goal for one configured digital employee,
-receives a private receipt, and can query that receipt. It uses the existing
+receives a private receipt, and can query or cancel that receipt. Shared atomic
+quotas bound admission rates, pending work, and retained records. It uses the existing
 Mattermost plugin SDK and plugin KV store, without changing Mattermost core.
 
 **This is local intake, not an Octop connector or a 1.0 integration.** There is
@@ -13,7 +14,7 @@ installed into a live Mattermost instance as part of implementation validation.
 **Never put secrets or sensitive information in a slash command.** Mattermost
 can audit the complete command before the plugin checks permissions or rejects
 it. An ephemeral reply does not make the submitted command private from server
-auditing. Seven-day plugin KV expiry does **not** delete server audit logs,
+auditing. Seven-day receipt access expiry does **not** delete server audit logs,
 exports, collector copies, or backups. Review the retention guidance below
 before enabling intake.
 
@@ -27,7 +28,7 @@ make test
 make bundle
 ```
 
-The Linux amd64 bundle is `dist/ai-tagent-intake-0.1.1-linux-amd64.tar.gz`.
+The Linux amd64 bundle is `dist/ai-tagent-intake-0.2.0-linux-amd64.tar.gz`.
 The manifest requires Mattermost 12.2.0, the repository's development baseline;
 compatibility with older servers is not claimed. The bundle retains the root
 license unchanged. Building a plugin does not grant a commercial feature license.
@@ -45,6 +46,7 @@ An administrator must provide all of these settings:
 | Setting | Meaning |
 | --- | --- |
 | `Enabled` | Explicitly enable local intake |
+| `QuotaStorageReady` | Operator confirms fresh/quiesced storage and synchronized node clocks; see upgrade gate below |
 | `OrganizationID` | External organization identifier, at most 128 bytes |
 | `EmployeeID` | Business digital employee identifier, at most 128 bytes |
 | `BotUserID` | Existing, active, dedicated Bot account for that employee |
@@ -64,15 +66,20 @@ identifiers are administrator-provided labels, not verified Octop bindings.
 ```text
 /aitagent request Inspect service health
 /aitagent status <64-character-receipt-id>
+/aitagent cancel <64-character-receipt-id>
 ```
 
 Goals must contain 1–2000 Unicode characters, subject to an 8192-byte command
 limit. Do not submit credentials, secrets, or sensitive production output.
 Receipts retain the plaintext goal and its SHA-256, real submitting user ID,
 employee and Bot IDs, scope, binding hash, source, mode, and timestamps in the
-plugin KV store for seven days. Expired receipts are also rejected on read even
-if storage cleanup has not yet removed them. KV expiration is not a guarantee
-that backups or Mattermost's independent logs have been purged.
+bounded plugin KV ledger. Receipts become inaccessible after seven days; expired
+entries are removed on a subsequent successful ledger update. **Cleanup is lazy**:
+if the plugin is inactive, storage fails, or no commands arrive, expired plaintext
+can remain physically stored beyond seven days. The ledger key has no database
+TTL, so expiration of an old record cannot erase newer reservations. Cancellation
+removes the goal from the current ledger value, but retains a hash/identity
+tombstone until expiry. Neither operation deletes audit, export, or backup copies.
 
 Responses are ephemeral command responses to the submitting user; the plugin
 does not echo the goal, change the response username, or create channel posts.
@@ -87,7 +94,7 @@ There are separate retention domains:
 
 | Data | Storage and retention control |
 | --- | --- |
-| Plugin receipt, including plaintext goal | Plugin KV: seven-day expiry and rejection of expired reads; physical database cleanup and backups are separate |
+| Plugin receipt, including plaintext goal | Bounded KV ledger: seven-day access expiry; lazy cleanup on successful state operations; old data can remain while inactive or on failure; backups separate |
 | Full slash command, including its goal | Mattermost audit targets, if configured and active: server logging, rotation, collectors and organizational retention policy |
 | Copies and exports | SIEM/collectors, exports, backup systems and any proxy request-body logs: each system's own access and deletion controls |
 
@@ -158,7 +165,8 @@ configuration was inspected or changed. See also the
 - A goal is untrusted text, never a source of identity, execution permission,
   approval, destination, or operation mode. The plugin stamps
   `source=mattermost_plugin_command`, `operation_mode=user_requested`, and
-  `state=awaiting_octop_authorization` itself.
+  `state=awaiting_octop_authorization` itself. Only an authorized owner can
+  change a local pending receipt to `cancelled`; no execution state is invented.
 - `user_requested` means an authenticated non-Bot account requested the work,
   not proof of a person at a keyboard: a user session/token can also be automated.
   This plugin does not perform the work or infer a human execution mode. Future human-operated and autonomous
@@ -167,13 +175,101 @@ configuration was inspected or changed. See also the
 - All Bot actors, including the target employee Bot, are rejected. There are
   no passive message hooks, so a Bot report cannot trigger intake recursively.
 - A SHA-256 of the server trigger, actor, and channel identifies a dispatch.
-  Atomic KV creation with seven-day expiry gives one receipt for duplicate
-  delivery of that dispatch; changed content or binding conflicts are rejected.
+  A shared-ledger CAS gives one receipt for duplicate delivery of that dispatch
+  during seven-day retention; changed content or binding conflicts are rejected.
   The trigger token itself is not stored. A newly submitted slash command gets
   a new server trigger and is a new request, even if its text is identical.
   Replay protection is bounded by retention, not permanent.
 - Storage errors return a generic response. An uncertain write includes the
   receipt ID for lookup and never initiates execution or external delivery.
+
+## Admission quotas and distributed consistency (0.2)
+
+These fixed pilot limits apply to all configured bindings sharing this plugin
+ID and Mattermost database. They do not span separate Mattermost instances.
+Organization IDs are administrator-configured labels, not independently verified
+Octop organizations. The installation cap remains in force when bindings change.
+
+| Scope | New admissions in a rolling 60 seconds | Pending receipts |
+| --- | --- | --- |
+| Authenticated user ID, across bindings/organizations | 4 | 8 |
+| Configured organization ID | 16 | 32 |
+| Entire plugin installation | 32 | 64 |
+
+Additional resource bounds: 128 retained receipts including cancellation
+tombstones, 2 MiB serialized ledger, at most four in-flight commands **per plugin
+process**, and at most eight CAS attempts per ledger operation. There is no
+unbounded retry queue. Saturation returns a private busy/limit response. These
+are admission limits, not a general API/DDoS rate limiter: rejected commands,
+status reads and cancellation do not consume admission rate. Configure existing
+Mattermost/reverse-proxy ingress protection separately; audits occur upstream.
+
+Cancellation releases the pending slot only. It does not refund the rolling
+rate or remove the tombstone from the 128-record cap. Repeating a cancelled
+dispatch returns its cancelled receipt, never a new pending request. After a
+successful operation prunes expired receipts, their slots can be reused. Because
+there is no Octop worker, nothing is automatically marked completed. A binding
+change never resets shared quotas; it can prevent cancellation under the new
+binding until the original binding is restored or the receipt expires.
+
+The 128-record cap intentionally can stop a pilot for the rest of its retention
+window even when pending slots remain. Do not delete/reset the ledger to free
+capacity: that would lose reservations, rate history and replay protection.
+
+Source-level guarantees and limits:
+
+- `server/channels/store/sqlstore/plugin_store.go` performs CAS against the
+  primary database: nil old value inserts under a unique key; a non-nil old
+  value updates only matching bytes of an unexpired row. A conflict returns
+  false. `Get` and `ListWithOptions` read from replicas and may be stale. A nil
+  insert's expired-row cleanup and insert are separate statements, not a
+  multi-key transaction. Equality at the expiry boundary can temporarily fail
+  both a read and an insert. The ledger deliberately uses **no row TTL**.
+- All receipts, pending counts (derived from receipt states), and rolling rate
+  history (derived from admission times, including cancelled records) live in
+  one `intake_ledger_v2` value. One CAS commits admission/reservation or
+  cancellation/release together. No independent counter can get out of sync.
+  A monotonically increasing revision prevents a prior byte snapshot from
+  matching again after state returns to superficially similar contents (ABA).
+- Each successful status result is also confirmed by CAS, so a stale replica
+  cannot return an obsolete pending status as confirmed current. Conflicts
+  trigger a bounded reread/retry; continuing lag returns busy. A stale snapshot
+  can conservatively reject a request even when newer state would permit it.
+- Storage errors have an uncertain outcome: no blind retry or compensation is
+  performed. Look up the receipt, then retry the same dispatch only if safe.
+  A newly submitted slash command has a new server trigger. **Dispatch dedupe
+  is not business idempotency**, an exactly-once task guarantee, or permanent
+  replay protection. Future Octop handoff needs a durable business operation ID.
+- Shared rate windows and expiry use plugin-node wall clocks. Nodes must have
+  synchronized clocks; backward time relative to the stored high-water mark
+  fails closed. Forward jumps cannot be distinguished from elapsed time using
+  this API and can shorten a real-time window. No strict wall-clock guarantee
+  is claimed under arbitrary skew. Permission checks are fresh per command,
+  but are not one database transaction with the ledger CAS. As with ordinary
+  server requests, revocation racing an already-authorized command is not an
+  instantaneous global fence. Downstream actions must reauthorize independently.
+- There must be no external writer, restore, deletion or mixed-version process
+  modifying the ledger. Malformed/oversized state fails closed; it is never
+  silently replaced with zero counts. The byte-size check is after the KV API
+  returns data; it bounds decoding/accepted writes, not upstream database/RPC
+  allocation for externally corrupted oversized values.
+
+### Upgrade/storage gate
+
+Both `Enabled` and `QuotaStorageReady` default to false. The latter is an
+**operator acknowledgement, not an automatic readiness test**. A fresh isolated
+installation is the supported starting point. Before enabling an upgrade from
+0.1.x, stop admission on all nodes, stop old plugin writers, wait out/reconcile
+all legacy receipt lifetimes and verify authoritative database state and replica
+catch-up. Verify node clock synchronization. Do not run a rolling mixed-version
+upgrade or reset live data to pass this check. The new implementation has no
+automatic migration and does not provide status access to legacy receipts.
+
+When the ledger is absent, an additional prefix lookup rejects visible
+`request_` legacy keys. Because that lookup uses a replica, an empty result
+cannot certify a clean primary or the absence of old writers. If that deployment
+verification cannot be performed, leave `QuotaStorageReady=false`: safe upgrade
+is blocked. No deployment readiness was certified in the offline tests.
 
 ## Validation and remaining gates
 
@@ -184,10 +280,23 @@ binding changes, expiration, storage errors, and private responses. Unexpected
 API calls fail tests. These tests do not establish real server RPC dispatch,
 database atomicity/expiration, installation, or end-to-end Octop delivery.
 
+Quota tests use exact-byte CAS against an authoritative in-memory map, separate
+stale-read snapshots, multiple independent plugin instances, and injected errors
+both before and after commit. They cover all quota scopes, rolling-window
+boundaries, cancellation without rate refunds, tombstone capacity, expiry,
+failed cleanup, backward clocks, local concurrency bounds and malformed state.
+
+An optional `python3 tests/postgres_cas.py` check uses an already-cached official
+`postgres:15` image on the managed Docker socket. It creates a disposable
+network-disabled container with no host ports and synthetic data only, tests
+the reviewed SQL insert/CAS/expiry primitives under concurrency, then removes
+the container. It never pulls an image. This is not a test of Mattermost's store
+wrapper, replica routing, plugin RPC, or deployment-specific database behavior.
+
 Before broader use: validate the bundle on an authorized isolated Mattermost
 instance; verify command dispatch, private responses and real KV behavior;
 implement authenticated Octop identity mapping and per-action authorization;
 define a durable handoff/outbox with reconciliation; add approval invalidation,
-separate human/automatic execution evidence, rate limits, retention/deletion
+separate human/automatic execution evidence, deployment-level request rate limits, retention/deletion
 operations and an external audit policy. Do not treat a local receipt as an
 approved, queued, executed, or externally delivered Octop task.

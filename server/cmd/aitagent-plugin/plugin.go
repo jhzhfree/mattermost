@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"unicode/utf8"
 
 	"github.com/mattermost/mattermost/server/public/model"
@@ -17,18 +18,21 @@ import (
 const (
 	receiptTTL    = 7 * 24 * 60 * 60
 	receiptState  = "awaiting_octop_authorization"
-	usage         = "Use /aitagent request <goal> or /aitagent status <receipt-id>. Execution and external delivery are not connected."
-	privacyNotice = "Do not put secrets or sensitive information in slash commands. Mattermost server audit logs may contain the full command, even when intake is rejected. The 7-day expiry applies only to plugin KV receipts; audit logs, exports and backups have separate retention."
+	usage         = "Use /aitagent request <goal> or /aitagent status <receipt-id> or /aitagent cancel <receipt-id>. Execution and external delivery are not connected."
+	privacyNotice = "Do not put secrets or sensitive information in slash commands. Mattermost server audit logs may contain the full command, even when intake is rejected. The 7-day expiry applies only to plugin receipt access; storage cleanup is lazy and may be delayed; audit logs, exports and backups have separate retention."
 )
 
 // Plugin exposes only an explicit command hook. It has no message hooks, public
 // HTTP handler, scheduler, outbound client, or calls to create posts.
 type Plugin struct {
 	plugin.MattermostPlugin
+	active atomic.Int32
+	clock  func() int64 // injected only by offline tests
 }
 
 type configuration struct {
 	Enabled             bool
+	QuotaStorageReady   bool
 	OrganizationID      string
 	EmployeeID          string
 	BotUserID           string
@@ -62,7 +66,7 @@ func (p *Plugin) OnActivate() error {
 		Trigger:          "aitagent",
 		AutoComplete:     true,
 		AutoCompleteDesc: "Local intake only. No secrets or sensitive information: full commands may be audited beyond 7 days.",
-		AutoCompleteHint: "[request <goal> | status <receipt-id>]",
+		AutoCompleteHint: "[request <goal> | status <receipt-id> | cancel <receipt-id>]",
 	})
 }
 
@@ -76,12 +80,12 @@ func digest(value string) string {
 }
 
 func (c configuration) valid() bool {
-	if !c.Enabled || strings.TrimSpace(c.OrganizationID) == "" || strings.TrimSpace(c.EmployeeID) == "" ||
+	if !c.Enabled || !c.QuotaStorageReady || strings.TrimSpace(c.OrganizationID) == "" || strings.TrimSpace(c.EmployeeID) == "" ||
 		len(c.OrganizationID) > 128 || len(c.EmployeeID) > 128 ||
 		!model.IsValidId(c.BotUserID) || !model.IsValidId(c.TeamID) || !model.IsValidId(c.ChannelID) {
 		return false
 	}
-	if strings.TrimSpace(c.AllowedRequesterIDs) == "" {
+	if strings.TrimSpace(c.AllowedRequesterIDs) == "" || len(c.AllowedRequesterIDs) > 8192 {
 		return false
 	}
 	for _, id := range strings.Split(c.AllowedRequesterIDs, ",") {
@@ -134,11 +138,16 @@ func (p *Plugin) authorize(c configuration, args *model.CommandArgs) bool {
 }
 
 func (p *Plugin) ExecuteCommand(_ *plugin.Context, args *model.CommandArgs) (*model.CommandResponse, *model.AppError) {
+	if p.active.Add(1) > 4 {
+		p.active.Add(-1)
+		return reply(errBusy.Error())
+	}
+	defer p.active.Add(-1)
 	if args == nil || len(args.Command) > 8192 {
 		return reply(usage)
 	}
 	fields := strings.Fields(args.Command)
-	if len(fields) < 2 || fields[0] != "/aitagent" || (fields[1] != "request" && fields[1] != "status") {
+	if len(fields) < 2 || fields[0] != "/aitagent" || (fields[1] != "request" && fields[1] != "status" && fields[1] != "cancel") {
 		return reply(usage)
 	}
 	var config configuration
@@ -148,16 +157,13 @@ func (p *Plugin) ExecuteCommand(_ *plugin.Context, args *model.CommandArgs) (*mo
 	if !p.authorize(config, args) {
 		return reply("This request is not permitted for the current user, employee, and channel binding.")
 	}
-	if fields[1] == "status" {
+	if fields[1] == "status" || fields[1] == "cancel" {
 		if len(fields) != 3 || !validReceiptID(fields[2]) {
 			return reply(usage)
 		}
-		stored, err := p.readReceipt(fields[2])
+		stored, err := p.lookup(fields[2], config, args, fields[1] == "cancel")
 		if err != nil {
-			return reply("Receipt storage is unavailable. No execution or delivery was attempted.")
-		}
-		if !ownedReceipt(stored, fields[2], config, args) {
-			return reply("Receipt not available for the current user and binding.")
+			return reply(err.Error())
 		}
 		return receiptReply(stored)
 	}
@@ -170,31 +176,21 @@ func (p *Plugin) ExecuteCommand(_ *plugin.Context, args *model.CommandArgs) (*mo
 	// than persisting the trigger token. This deduplicates the same dispatch;
 	// a new client submission receives a new trigger and is a new request.
 	id := digest(args.TriggerId + "\x00" + args.UserId + "\x00" + args.ChannelId)
-	now := model.GetMillis()
+	now := p.nowMillis()
 	r := &receipt{
 		ID: id, Source: "mattermost_plugin_command", OperationMode: "user_requested",
 		ActorUserID: args.UserId, OrganizationID: config.OrganizationID, EmployeeID: config.EmployeeID,
 		BotUserID: config.BotUserID, TeamID: args.TeamId, ChannelID: args.ChannelId, BindingHash: config.hash(),
 		Goal: goal, GoalHash: digest(goal), State: receiptState, CreatedAt: now, ExpiresAt: now + receiptTTL*1000,
 	}
-	data, err := json.Marshal(r)
+	stored, err := p.admit(r, config, args)
 	if err != nil {
-		return reply("Request could not be recorded. No execution or delivery was attempted.")
-	}
-	stored, appErr := p.API.KVSetWithOptions("request_"+id, data, model.PluginKVSetOptions{Atomic: true, ExpireInSeconds: receiptTTL})
-	if appErr != nil {
-		// A storage timeout can have an uncertain outcome. Never claim failure
-		// means nothing was written, and never turn it into an external action.
-		return reply(fmt.Sprintf("Receipt storage outcome is uncertain. Check /aitagent status %s. No execution or delivery was attempted.", id))
-	}
-	if !stored {
-		existing, readErr := p.readReceipt(id)
-		if readErr != nil || !ownedReceipt(existing, id, config, args) || existing.GoalHash != r.GoalHash || existing.Goal != goal {
-			return reply("This command dispatch conflicts with an existing receipt. No execution or delivery was attempted.")
+		if err == errUncertain {
+			return reply(fmt.Sprintf("%s Check /aitagent status %s.", err.Error(), id))
 		}
-		return receiptReply(existing)
+		return reply(err.Error())
 	}
-	return receiptReply(r)
+	return receiptReply(stored)
 }
 
 func validReceiptID(id string) bool {
@@ -202,28 +198,13 @@ func validReceiptID(id string) bool {
 	return err == nil && len(decoded) == sha256.Size && strings.ToLower(id) == id
 }
 
-func (p *Plugin) readReceipt(id string) (*receipt, error) {
-	data, appErr := p.API.KVGet("request_" + id)
-	if appErr != nil {
-		return nil, appErr
-	}
-	if len(data) == 0 {
-		return nil, nil
-	}
-	var r receipt
-	if err := json.Unmarshal(data, &r); err != nil {
-		return nil, err
-	}
-	return &r, nil
-}
-
-func ownedReceipt(r *receipt, id string, c configuration, args *model.CommandArgs) bool {
+func ownedReceiptAt(r *receipt, id string, c configuration, args *model.CommandArgs, now int64) bool {
 	return r != nil && r.ID == id && r.ActorUserID == args.UserId && r.TeamID == args.TeamId &&
 		r.ChannelID == args.ChannelId && r.BindingHash == c.hash() && r.BotUserID == c.BotUserID &&
-		r.OrganizationID == c.OrganizationID && r.EmployeeID == c.EmployeeID && r.ExpiresAt > model.GetMillis() &&
-		r.Source == "mattermost_plugin_command" && r.OperationMode == "user_requested" && r.State == receiptState
+		r.OrganizationID == c.OrganizationID && r.EmployeeID == c.EmployeeID && r.ExpiresAt > now &&
+		r.Source == "mattermost_plugin_command" && r.OperationMode == "user_requested" && (r.State == receiptState || r.State == cancelledState)
 }
 
 func receiptReply(r *receipt) (*model.CommandResponse, *model.AppError) {
-	return reply(fmt.Sprintf("Receipt %s\nStatus: %s. Plugin KV receipt expires after 7 days. No task has been executed or delivered to Octop.", r.ID, r.State))
+	return reply(fmt.Sprintf("Receipt %s\nStatus: %s. Receipt access expires after 7 days; physical cleanup may be delayed. No task has been executed or delivered to Octop.", r.ID, r.State))
 }

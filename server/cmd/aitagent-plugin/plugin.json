@@ -2,19 +2,65 @@
   "id": "com.aitagent.intake",
   "name": "AI-TAgent Request Intake",
   "description": "Local, explicitly authorized human request intake. No task execution or Octop delivery.",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "min_server_version": "12.2.0",
-  "server": {"executables": {"linux-amd64": "server/linux-amd64"}},
+  "server": {
+    "executables": {
+      "linux-amd64": "server/linux-amd64"
+    }
+  },
   "settings_schema": {
-    "header": "Do not put secrets or sensitive information in slash commands. Server audit logs may contain the full command even when intake is rejected, and have retention separate from the plugin's 7-day KV expiry. Review every audit sink, export and backup before enabling intake. Disabled by default. Configure a single test team/channel, an existing digital employee Bot, and allowed requester IDs. These settings grant intake access only, not Octop execution permission.",
+    "header": "Do not put secrets or sensitive information in slash commands. Server audit logs may contain the full command even when intake is rejected, and have retention separate from the plugin's 7-day receipt access expiry (physical cleanup is lazy). Review every audit sink, export and backup before enabling intake. Disabled by default. Configure a single test team/channel, an existing digital employee Bot, and allowed requester IDs. These settings grant intake access only, not Octop execution permission.",
     "settings": [
-      {"key": "Enabled", "display_name": "Enable local intake", "type": "bool", "default": false},
-      {"key": "OrganizationID", "display_name": "Octop organization identifier", "type": "text", "default": ""},
-      {"key": "EmployeeID", "display_name": "Digital employee identifier", "type": "text", "default": ""},
-      {"key": "BotUserID", "display_name": "Existing dedicated Bot user ID", "type": "text", "default": ""},
-      {"key": "TeamID", "display_name": "Allowed team ID", "type": "text", "default": ""},
-      {"key": "ChannelID", "display_name": "Allowed channel ID", "type": "text", "default": ""},
-      {"key": "AllowedRequesterIDs", "display_name": "Allowed human user IDs (comma-separated)", "type": "text", "default": ""}
+      {
+        "key": "Enabled",
+        "display_name": "Enable local intake",
+        "type": "bool",
+        "default": false
+      },
+      {
+        "key": "QuotaStorageReady",
+        "display_name": "Verified fresh/quiesced quota storage and synchronized node clocks",
+        "type": "bool",
+        "default": false,
+        "help_text": "Required for 0.2 admission. Not an automatic migration. Confirm no old-version writers or live legacy receipts remain, primary/replica state is consistent, and node clocks are synchronized. See README; do not reset a live ledger."
+      },
+      {
+        "key": "OrganizationID",
+        "display_name": "Octop organization identifier",
+        "type": "text",
+        "default": ""
+      },
+      {
+        "key": "EmployeeID",
+        "display_name": "Digital employee identifier",
+        "type": "text",
+        "default": ""
+      },
+      {
+        "key": "BotUserID",
+        "display_name": "Existing dedicated Bot user ID",
+        "type": "text",
+        "default": ""
+      },
+      {
+        "key": "TeamID",
+        "display_name": "Allowed team ID",
+        "type": "text",
+        "default": ""
+      },
+      {
+        "key": "ChannelID",
+        "display_name": "Allowed channel ID",
+        "type": "text",
+        "default": ""
+      },
+      {
+        "key": "AllowedRequesterIDs",
+        "display_name": "Allowed human user IDs (comma-separated)",
+        "type": "text",
+        "default": ""
+      }
     ]
   }
 }
