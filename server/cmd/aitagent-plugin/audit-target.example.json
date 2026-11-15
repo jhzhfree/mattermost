@@ -1,0 +1,20 @@
+{
+  "reviewed_audit_file": {
+    "type": "file",
+    "format": "json",
+    "levels": [
+      {"id": 100, "name": "audit-api"},
+      {"id": 101, "name": "audit-content"},
+      {"id": 102, "name": "audit-permissions"},
+      {"id": 103, "name": "audit-cli"}
+    ],
+    "options": {
+      "filename": "./logs/reviewed-audit.log",
+      "max_size": 100,
+      "max_age": 30,
+      "max_backups": 10,
+      "compress": true
+    },
+    "maxqueuesize": 1000
+  }
+}

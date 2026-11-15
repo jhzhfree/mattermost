@@ -15,9 +15,10 @@ import (
 )
 
 const (
-	receiptTTL   = 7 * 24 * 60 * 60
-	receiptState = "awaiting_octop_authorization"
-	usage        = "Use /aitagent request <goal> or /aitagent status <receipt-id>. Requests are retained locally for 7 days; do not include secrets. Execution and external delivery are not connected."
+	receiptTTL    = 7 * 24 * 60 * 60
+	receiptState  = "awaiting_octop_authorization"
+	usage         = "Use /aitagent request <goal> or /aitagent status <receipt-id>. Execution and external delivery are not connected."
+	privacyNotice = "Do not put secrets or sensitive information in slash commands. Mattermost server audit logs may contain the full command, even when intake is rejected. The 7-day expiry applies only to plugin KV receipts; audit logs, exports and backups have separate retention."
 )
 
 // Plugin exposes only an explicit command hook. It has no message hooks, public
@@ -60,13 +61,13 @@ func (p *Plugin) OnActivate() error {
 	return p.API.RegisterCommand(&model.Command{
 		Trigger:          "aitagent",
 		AutoComplete:     true,
-		AutoCompleteDesc: "Submit a local digital employee request (no execution)",
+		AutoCompleteDesc: "Local intake only. No secrets or sensitive information: full commands may be audited beyond 7 days.",
 		AutoCompleteHint: "[request <goal> | status <receipt-id>]",
 	})
 }
 
 func reply(text string) (*model.CommandResponse, *model.AppError) {
-	return &model.CommandResponse{ResponseType: model.CommandResponseTypeEphemeral, Text: text}, nil
+	return &model.CommandResponse{ResponseType: model.CommandResponseTypeEphemeral, Text: text + "\n\n" + privacyNotice}, nil
 }
 
 func digest(value string) string {
@@ -224,5 +225,5 @@ func ownedReceipt(r *receipt, id string, c configuration, args *model.CommandArg
 }
 
 func receiptReply(r *receipt) (*model.CommandResponse, *model.AppError) {
-	return reply(fmt.Sprintf("Receipt %s\nStatus: %s. Stored locally for up to 7 days. No task has been executed or delivered to Octop.", r.ID, r.State))
+	return reply(fmt.Sprintf("Receipt %s\nStatus: %s. Plugin KV receipt expires after 7 days. No task has been executed or delivered to Octop.", r.ID, r.State))
 }

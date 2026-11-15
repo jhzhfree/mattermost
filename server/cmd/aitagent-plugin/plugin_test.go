@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/mattermost/mattermost/server/public/plugin"
+	"github.com/mattermost/mattermost/server/public/shared/mlog"
 )
 
 // Unimplemented methods on the embedded API panic. An accidental CreatePost,
@@ -97,6 +99,9 @@ func invoke(t *testing.T, p *Plugin, args *model.CommandArgs) string {
 	}
 	if response.ResponseType != model.CommandResponseTypeEphemeral || response.Username != "" || response.ChannelId != "" || len(response.ExtraResponses) != 0 {
 		t.Fatalf("response must remain a private command response without impersonation: %+v", response)
+	}
+	if !strings.HasSuffix(response.Text, privacyNotice) {
+		t.Fatal("command response omitted the command-auditing and separate-retention warning")
 	}
 	return response.Text
 }
@@ -232,7 +237,7 @@ func TestReceiptAuthorizationRechecked(t *testing.T) {
 func TestStorageFailureAndExpiry(t *testing.T) {
 	p, f, args := fixture()
 	f.writeErr = model.NewAppError("test", "test.storage", nil, "secret diagnostic", 500)
-	if text := invoke(t, p, args); !strings.Contains(text, "uncertain") || strings.Contains(text, "secret") || f.writes != 0 {
+	if text := invoke(t, p, args); !strings.Contains(text, "uncertain") || strings.Contains(text, "secret diagnostic") || f.writes != 0 {
 		t.Fatal(text)
 	}
 	f.writeErr = nil
@@ -240,7 +245,7 @@ func TestStorageFailureAndExpiry(t *testing.T) {
 	r := readOnlyReceipt(t, f)
 	args.Command = "/aitagent status " + r.ID
 	f.readErr = model.NewAppError("test", "test.storage", nil, "secret diagnostic", 500)
-	if text := invoke(t, p, args); !strings.Contains(text, "unavailable") || strings.Contains(text, "secret") {
+	if text := invoke(t, p, args); !strings.Contains(text, "unavailable") || strings.Contains(text, "secret diagnostic") {
 		t.Fatal(text)
 	}
 	f.readErr = nil
@@ -279,7 +284,7 @@ func TestUnicodeGoalBoundaryAndInvalidStatus(t *testing.T) {
 	}
 	for _, command := range []string{"/aitagent status", "/aitagent status ../../key", "/aitagent status " + strings.Repeat("a", 64) + " extra", "/aitagent status " + strings.Repeat("A", 64)} {
 		args.Command = command
-		if text := invoke(t, p, args); text != usage {
+		if text := invoke(t, p, args); text != usage+"\n\n"+privacyNotice {
 			t.Fatalf("invalid status was accepted: %s", text)
 		}
 	}
@@ -307,6 +312,9 @@ func TestCommandRegistrationAndNoPassiveHooks(t *testing.T) {
 	if err := p.OnActivate(); err != nil || f.command.Trigger != "aitagent" {
 		t.Fatal("registration failed")
 	}
+	if !strings.Contains(f.command.AutoCompleteDesc, "No secrets or sensitive information") || !strings.Contains(f.command.AutoCompleteDesc, "beyond 7 days") {
+		t.Fatal("autocomplete must warn before the user submits a goal")
+	}
 	f.registerErr = errors.New("registration failed")
 	if p.OnActivate() == nil {
 		t.Fatal("registration error ignored")
@@ -333,5 +341,59 @@ func TestManifest(t *testing.T) {
 	}
 	if manifest.Id != "com.aitagent.intake" || manifest.Server.Executables["linux-amd64"] != "server/linux-amd64" {
 		t.Fatal("unexpected plugin manifest")
+	}
+	if !strings.Contains(manifest.SettingsSchema.Header, "full command even when intake is rejected") || !strings.Contains(manifest.SettingsSchema.Header, "separate") {
+		t.Fatal("administrator settings must warn about the separate audit retention")
+	}
+}
+
+func TestRejectedIntakeDoesNotEraseServerAuditSnapshot(t *testing.T) {
+	p, f, args := fixture()
+	args.Command = "/aitagent request SYNTHETIC-AUDIT-MARKER"
+	audit := &model.AuditRecord{}
+	// Mirrors the API's pre-plugin audit capture using the real model helpers.
+	model.AddEventParameterAuditableToAuditRec(audit, "command_args", args)
+	f.config.Enabled = false
+	invoke(t, p, args)
+	if f.writes != 0 {
+		t.Fatal("disabled intake wrote a KV receipt")
+	}
+	args.Command = "redacted after capture"
+	parameters := audit.EventData.Parameters["command_args"].(map[string]any)
+	if parameters["command"] != "/aitagent request SYNTHETIC-AUDIT-MARKER" {
+		t.Fatal("server audit snapshot behavior changed; reassess retention guidance")
+	}
+}
+
+func TestAuditTargetExampleValidatesOffline(t *testing.T) {
+	data, err := os.ReadFile("audit-target.example.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var config mlog.LoggerConfiguration
+	if err := json.Unmarshal(data, &config); err != nil {
+		t.Fatal(err)
+	}
+	target, exists := config["reviewed_audit_file"]
+	if !exists || len(config) != 1 {
+		t.Fatal("expected a standalone example target")
+	}
+	var options map[string]any
+	if err := json.Unmarshal(target.Options, &options); err != nil {
+		t.Fatal(err)
+	}
+	if options["max_age"] != float64(30) || options["max_backups"] != float64(10) || options["max_size"] != float64(100) || options["compress"] != true {
+		t.Fatal("example differs from documented illustrative retention")
+	}
+	// Validator constructs a file target. Never use the example's operational
+	// path in a test and never write real command content to that target.
+	options["filename"] = filepath.Join(t.TempDir(), "audit-example.log")
+	target.Options, err = json.Marshal(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config["reviewed_audit_file"] = target
+	if err := config.IsValid(mlog.MLvlAuditAll); err != nil {
+		t.Fatal(err)
 	}
 }
