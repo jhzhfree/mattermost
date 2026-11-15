@@ -69,7 +69,7 @@ func TestReceiptToOfflineVerifiedIntent(t *testing.T) {
 		if err != nil {
 			return handoff.SourceRecord{}, err
 		}
-		return handoff.SourceRecord{Intent: i, State: current.State}, nil
+		return handoff.SourceRecord{Commitment: handoff.IntentCommitment(i), State: current.State, ReceiptExpiresAt: i.ReceiptExpiresAt}, nil
 	}
 	if _, err := handoff.VerifyWithSource(context.Background(), proof, policy, func() int64 { return now / 1000 }, source); err != nil {
 		t.Fatal(err)

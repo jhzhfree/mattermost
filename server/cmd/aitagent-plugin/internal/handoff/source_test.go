@@ -48,17 +48,19 @@ func TestSourceRecheckFailsClosedAndRechecksTime(t *testing.T) {
 		"unavailable": func(context.Context, Binding, string) (SourceRecord, error) {
 			return SourceRecord{}, errors.New("private upstream detail")
 		},
-		"cancelled": func(context.Context, Binding, string) (SourceRecord, error) { return SourceRecord{i, "cancelled"}, nil },
-		"missing":   func(context.Context, Binding, string) (SourceRecord, error) { return SourceRecord{}, nil },
+		"cancelled": func(context.Context, Binding, string) (SourceRecord, error) {
+			return observeSource(i, "cancelled"), nil
+		},
+		"missing": func(context.Context, Binding, string) (SourceRecord, error) { return SourceRecord{}, nil },
 		"changed-goal": func(context.Context, Binding, string) (SourceRecord, error) {
 			other := i
 			other.Goal = "changed"
-			return SourceRecord{other, "awaiting_octop_authorization"}, nil
+			return observeSource(other, "awaiting_octop_authorization"), nil
 		},
 		"changed-expiry": func(context.Context, Binding, string) (SourceRecord, error) {
 			other := i
 			other.ReceiptExpiresAt--
-			return SourceRecord{other, "awaiting_octop_authorization"}, nil
+			return observeSource(other, "awaiting_octop_authorization"), nil
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -74,7 +76,7 @@ func TestSourceRecheckFailsClosedAndRechecksTime(t *testing.T) {
 		if b != i.Binding || id != i.Receipt {
 			t.Fatal("wrong lookup scope")
 		}
-		return SourceRecord{i, "awaiting_octop_authorization"}, nil
+		return observeSource(i, "awaiting_octop_authorization"), nil
 	}
 	for n := 0; n < 2; n++ {
 		if _, err := VerifyWithSource(ctx, proof, p, clock, reader); err != nil {
@@ -88,7 +90,7 @@ func TestSourceRecheckFailsClosedAndRechecksTime(t *testing.T) {
 		now := int64(101)
 		slow := func(context.Context, Binding, string) (SourceRecord, error) {
 			now = after
-			return SourceRecord{i, "awaiting_octop_authorization"}, nil
+			return observeSource(i, "awaiting_octop_authorization"), nil
 		}
 		if _, err := VerifyWithSource(ctx, proof, p, func() int64 { return now }, slow); err != ErrRejected {
 			t.Fatal("clock rewind or expiry during lookup accepted")
@@ -97,7 +99,7 @@ func TestSourceRecheckFailsClosedAndRechecksTime(t *testing.T) {
 	cancelCtx, cancel := context.WithCancel(ctx)
 	cancelReader := func(context.Context, Binding, string) (SourceRecord, error) {
 		cancel()
-		return SourceRecord{i, "awaiting_octop_authorization"}, nil
+		return observeSource(i, "awaiting_octop_authorization"), nil
 	}
 	if _, err := VerifyWithSource(cancelCtx, proof, p, clock, cancelReader); err != ErrRejected {
 		t.Fatal("cancelled context accepted")
@@ -155,4 +157,8 @@ func TestOpaqueIDsAndExplicitStableTargetMapping(t *testing.T) {
 	if _, err := Verify(proof, p, 101); err != ErrRejected {
 		t.Fatal("normalization aliased stable identity")
 	}
+}
+
+func observeSource(i Intent, state string) SourceRecord {
+	return SourceRecord{Commitment: IntentCommitment(i), State: state, ReceiptExpiresAt: i.ReceiptExpiresAt}
 }

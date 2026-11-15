@@ -26,12 +26,15 @@ const localLimitMessage = "This plugin process is rate-limited; retry later. Req
 const overloadMessage = "This plugin process is overloaded, has an overdue API call, or is cooling down. Retry later; do not automatically resubmit an uncertain request."
 
 type workBudget struct {
-	started  time.Time
-	deadline time.Time
-	now      func() time.Time
+	started   time.Time
+	deadline  time.Time
+	now       func() time.Time
+	cancelled func() bool // optional cooperative stop; set only on a private copy
 }
 
-func (b *workBudget) expired() bool { return !b.now().Before(b.deadline) }
+func (b *workBudget) expired() bool {
+	return (b.cancelled != nil && b.cancelled()) || !b.now().Before(b.deadline)
+}
 
 type commandEvent struct {
 	at         time.Time

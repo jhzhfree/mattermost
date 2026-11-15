@@ -1,4 +1,140 @@
-# AI-TAgent local request intake (0.2.4)
+# AI-TAgent local request intake (0.2.5)
+
+## Confirmed source observation → durable pending inbox (0.2.5)
+
+The isolated integration harness now actually calls the plugin source adapter,
+checks a signed intent, and commits pending metadata plus audit to PostgreSQL.
+This is a **standalone offline kernel**, not an Octop migration, authenticated
+source endpoint, production queue, or working task/execution integration. Plugin
+commands still have no external client. Both source binding and inbox default
+closed; only tests construct enabled instances. There is no runtime setting,
+HTTP route, service credential, scheduler or worker that connects these pieces.
+
+### Verified platform boundaries
+
+`server/channels/app/plugin_requests.go` removes incoming `Mattermost-User-Id`
+and sets it only after session/MFA/CSRF checks, but also invokes plugin handlers
+for unauthenticated/invalid-token requests. That header is not an independent
+service identity and cannot be trusted on a standalone HTTP listener. A client
+cannot be allowed to select a user/organization by supplying it. No header-based
+authentication or public `ServeHTTP` hook is added here.
+
+`server/channels/store/sqlstore/plugin_store.go` reads KV on `GetReplica()` and
+performs exact-old-value CAS on `GetMaster()`. A replica observation alone is not
+current state. The generated synchronous plugin RPC API still has no cancellable
+request context. A CAS false result can also hide transport failure. Existing
+primary-confirmation, bounded retries and unknown-write handling are reused.
+
+### Callable source adapter without goal disclosure
+
+`handoffSourceReader` accepts only a deployment-owned `sourceBinding`; it rejects
+a requested binding differing in any field before API calls. It derives the
+actor/team/channel from that pinned binding, not a request header or body. It
+uses the existing rejection prefilter and process **status** budget, then loads
+current configuration, checks user/Bot/member/post permissions, performs the
+existing ledger lookup with primary-side CAS confirmation, and reloads/rechecks
+configuration and permissions before returning. Cancelled, expired, missing,
+changed, uncertain or unconfirmed observations fail closed. The normal lookup
+increments ledger revision; this is a confirmed observation, not a read-only SQL
+operation or a source reservation.
+
+`SourceRecord` now contains only an intent commitment, state and source expiry;
+it contains no goal or proof. `VerifyWithSource` compares the commitment and
+expiry against its already-verified intent. The commitment is a domain-separated
+SHA-256 hash of the full intent; it is **not a secret, authorization token or
+proof of authenticity**. Protect source access and logs: low-entropy text hashes
+can still permit guessing. Real transport must authenticate the source and bind
+freshness/replay protection to each lookup; no signed/challenge-bound network
+response protocol is implemented. The direct in-process test call cannot prove
+that a remote service is live or its response is fresh.
+
+Cancellation of the Go context stops subsequent API work after control returns,
+but does not interrupt an issued RPC. A private budget copy observes cancellation;
+the shared process slot remains held until the synchronous call actually returns.
+Tests cover blocked-RPC release, no subsequent write after cancellation, stale
+replica rejection, ambiguous CAS confirmation, live source permission revocation,
+scope mismatch and goal-free source serialization. Existing process sharing,
+overdue-call shutdown/cooldown and cluster limitations are unchanged.
+
+### Actual persistent receipt-level intake contract
+
+`internal/handoff.Inbox.Accept` invokes source verification before opening a DB
+transaction. It requires an explicit `ReceiverAuthorizer` to recheck and lock
+current receiver trust/mapping/account/organization/Agent rights in that same
+transaction, including on duplicates. There is no permissive default. The test
+adapter locks synthetic authorization rows; a correct adapter for Octop's real
+permission tables and revocation model is **not implemented**.
+
+The PostgreSQL kernel atomically writes:
+
+- a unique delivery key and full conflict fingerprint;
+- stable mapped organization/employee/actor IDs, source expiry and the fixed
+  `pending_authorization` state;
+- one corresponding `pending_intake_recorded` audit row.
+
+No raw goal, proof, signature, token or key is stored. Identical authorized retries
+return `duplicate_pending_authorization` without adding another row/audit. A
+different fingerprint returns `conflict`. Renewed proofs and signing-key rotation
+retain the same delivery identity; current receiver key policy is still checked.
+Audit failure rolls back intake. Any commit error returns `commit_unknown`, with
+no compensating delete or automatic retry/new key. Tests inject an error **after
+a real successful commit**, reconnect and reconcile the same key as a duplicate.
+Actual socket-loss-at-commit behavior has not been exercised.
+
+A table lock serializes the fixture inbox and its 128-retained-row cap across
+processes. SQL lock waits are limited to 250 ms, statements to 1 second, with a
+2-second cooperative operation context. This is intentionally a small bounded
+experiment, not a tenant-fair or scalable queue. It has no pruning/reset API:
+expired/cancelled rows still consume retained capacity, and it eventually fails
+closed at 128. A production retention/tombstone/reconciliation policy must be
+designed without reopening replay admission. Database pools, ingress rate limits
+and tenant quotas also need deployment-specific enforcement.
+
+### Cancellation and recovery are still wiring gates
+
+The source CAS and receiver transaction are separate. A negative integration test
+**demonstrates** cancellation after source confirmation can still leave a pending
+receiver row. Nothing executes that row, but it cannot be advertised as current
+source permission. There is no distributed claim/lease, cancellation propagation,
+task-level idempotency, sender outbox or execution protocol. Zero-window revocation
+is not provided. Receiver policy checks must lock all relevant real permission
+and key/mapping revisions before commit; a constant-true callback is unacceptable.
+
+After an unknown outcome, retry/reconcile only the original identity when current
+source and receiver authorization still permit it. If the source expired or was
+cancelled, `Accept` rejects and cannot establish whether an older pending record
+exists. A separately authenticated reconciliation/cancellation endpoint is still
+needed; absence/error/replica lag must never trigger automatic new requests.
+Production remains unwired pending that protocol, durable sender recovery,
+trusted identity provisioning, authenticated TLS/freshness, independent secret
+isolation and actual Octop authorization/storage integration.
+
+### Reproducible isolated validation
+
+```sh
+# Uses installed Go + cached modules and an already-cached official postgres:15.
+# Never downloads images, accepts a production DSN, or publishes a host port.
+python3 tests/postgres_inbox.py --go /path/to/go
+```
+
+The harness compiles Go tests offline and starts its own temporary container with
+`--network none`, a tmpfs database and no host ports. Test binaries connect only
+to its Unix socket; local synthetic trust auth and `sslmode=disable` on that
+socket are not a production TLS configuration. It removes its container and test
+binaries afterward. No private keys are persisted; worker fixture files contain
+only public synthetic proofs/data and are temporary.
+
+Verified on PostgreSQL 15.20: command → guarded source → SQL pending/audit; eight
+independent receiver processes with one winner; reconnect deduplication; conflict,
+receiver/source revocation and key rotation; audit rollback; injected lost commit
+acknowledgement; expiry during authorization; retention exhaustion; bounded lock
+failure; and the unresolved post-read cancellation race. The Mattermost API/KV
+side uses the existing fake with reviewed replica/CAS semantics; this is **not**
+a live Mattermost/Octop test, replica deployment test or production auth test.
+The optional `offlinepg` binaries are compiled without the race runtime; ordinary
+Go tests run with `-race`. Earlier privacy, migration, source RPC, audit retention
+and 1.0 blockers remain applicable. Historical phase descriptions below describe
+what was available in those versions, not an assertion of production readiness.
 
 ## Source expiry, revocation and ID compatibility (0.2.4)
 
@@ -227,7 +363,7 @@ make test
 make bundle
 ```
 
-The Linux amd64 bundle is `dist/ai-tagent-intake-0.2.4-linux-amd64.tar.gz`.
+The Linux amd64 bundle is `dist/ai-tagent-intake-0.2.5-linux-amd64.tar.gz`.
 The manifest requires Mattermost 12.2.0, the repository's development baseline;
 compatibility with older servers is not claimed. The bundle retains the root
 license unchanged. Building a plugin does not grant a commercial feature license.

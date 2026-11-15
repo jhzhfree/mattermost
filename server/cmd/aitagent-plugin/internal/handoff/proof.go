@@ -181,9 +181,20 @@ func Verify(data []byte, p Policy, now int64) (Candidate, error) {
 // reader, not echoed from the proof or read from a stale replica/cache.
 // Pending is the only accepted state; missing/error/unknown outcomes fail closed.
 type SourceRecord struct {
-	Intent Intent
-	State  string
+	Commitment       string
+	State            string
+	ReceiptExpiresAt int64
 }
+
+// IntentCommitment allows an authenticated source lookup to confirm the exact
+// intent without returning its goal or a signed proof. This hash is not a secret
+// or an authorization token; protect lookup access and logs against disclosure.
+func IntentCommitment(i Intent) string {
+	data, _ := json.Marshal(i)
+	sum := sha256.Sum256(append([]byte("mattermost-source-observation/v1\x00"), data...))
+	return hex.EncodeToString(sum[:])
+}
+
 type SourceReader func(context.Context, Binding, string) (SourceRecord, error)
 
 // VerifyWithSource is an offline orchestration seam, NOT task authorization.
@@ -208,7 +219,7 @@ func VerifyWithSource(ctx context.Context, data []byte, p Policy, now func() int
 		return Candidate{}, ErrRejected
 	}
 	source, err := read(ctx, candidate.Intent.Binding, candidate.Intent.Receipt)
-	if err != nil || ctx.Err() != nil || source.State != "awaiting_octop_authorization" || source.Intent != candidate.Intent {
+	if err != nil || ctx.Err() != nil || source.State != "awaiting_octop_authorization" || source.Commitment != IntentCommitment(candidate.Intent) || source.ReceiptExpiresAt != candidate.Intent.ReceiptExpiresAt {
 		return Candidate{}, ErrRejected
 	}
 	after := now()
