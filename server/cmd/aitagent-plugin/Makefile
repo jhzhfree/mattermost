@@ -12,6 +12,7 @@ bundle:
 	cp plugin.json dist/plugin/plugin.json
 	cp README.md dist/plugin/README.md
 	cp DEMO.md dist/plugin/DEMO.md
+	cp OPERATIONS.md dist/plugin/OPERATIONS.md
 	cp DEPLOYMENT.md dist/plugin/DEPLOYMENT.md
 	cp SOURCE.md dist/plugin/SOURCE.md
 	cp INTEROP.md dist/plugin/INTEROP.md
@@ -20,7 +21,7 @@ bundle:
 	cp protocol/check_octop_contract.py protocol/octop-contract.json dist/plugin/protocol/
 	cp audit-target.example.json dist/plugin/audit-target.example.json
 	cp ../../../LICENSE.txt dist/plugin/LICENSE.txt
-	tar -czf dist/ai-tagent-intake-0.2.15-linux-amd64.tar.gz -C dist/plugin .
+	tar -czf dist/ai-tagent-intake-0.2.16-linux-amd64.tar.gz -C dist/plugin .
 
 # Explicit isolated scenario runner; no plugin setting enables the scheduler.
 REPORT ?= dist/demo-report.json

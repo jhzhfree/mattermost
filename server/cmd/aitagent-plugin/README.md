@@ -1,4 +1,14 @@
-# AI-TAgent local request intake (0.2.15)
+# AI-TAgent local request intake (0.2.16)
+
+## Administrator-selected recovery diagnostics (0.2.16)
+
+The standard Mattermost support-packet UI can now include an explicitly selected
+AI-TAgent local snapshot. It reuses the existing 16 process metrics and adds fixed
+manual recovery hints without querying KV/API or exporting identities/goals.
+[OPERATIONS.md](OPERATIONS.md) explains overdue calls, configuration failures and
+unknown-write reconciliation. No external alert, automatic retry/reset, public
+route or new monitoring service is introduced. Actual server/UI integration and
+primary authorization/dual-service gates remain unverified.
 
 ## Real-instance readiness and peer watermark contract (0.2.15)
 

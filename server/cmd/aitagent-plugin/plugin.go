@@ -23,7 +23,7 @@ const (
 	privacyNotice = "Do not put secrets or sensitive information in slash commands. Mattermost server audit logs may contain the full command, even when intake is rejected. The 7-day expiry applies only to plugin receipt access; storage cleanup is lazy and may be delayed; audit logs, exports and backups have separate retention."
 )
 
-// Plugin exposes explicit commands and a metrics-listener hook. It has no
+// Plugin exposes commands, metrics and opt-in local support data. It has no
 // message hooks, user-facing ServeHTTP endpoint, scheduler, outbound client,
 // or calls to create posts.
 type Plugin struct {

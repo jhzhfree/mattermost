@@ -213,6 +213,20 @@ func (p *Plugin) ServeMetrics(_ *plugin.Context, w http.ResponseWriter, r *http.
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+	for _, m := range p.localMetrics() {
+		fmt.Fprintf(w, "%s %v\n", m.name, m.value)
+	}
+}
+
+type localMetric struct {
+	name  string
+	value any
+}
+
+// One fixed, identity-free snapshot shared by metrics and support packets.
+// Values are approximate concurrent process observations, not an atomic audit.
+func (p *Plugin) localMetrics() []localMetric {
 	g := p.observation()
 	now := p.wallNow()
 	oldest := float64(0)
@@ -233,18 +247,23 @@ func (p *Plugin) ServeMetrics(_ *plugin.Context, w http.ResponseWriter, r *http.
 	}
 	active := len(g.running)
 	g.mu.Unlock()
-	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 	ready := 0
 	if snapshot := p.cachedConfig.Load(); snapshot != nil && snapshot.ready {
 		ready = 1
 	}
-	fmt.Fprintf(w, "aitagent_process_config_prefilter_ready %d\n", ready)
+
 	refreshing := 0
 	if p.refreshing.Load() {
 		refreshing = 1
 	}
-	fmt.Fprintf(w, "aitagent_process_config_refresh_inflight %d\n", refreshing)
-	fmt.Fprintf(w, "aitagent_process_inflight %d\naitagent_process_oldest_work_seconds %g\naitagent_process_overdue_commands %d\naitagent_process_cooldown_seconds %g\n", active, oldest, overdue, cooldown)
+	metrics := []localMetric{
+		{"aitagent_process_config_prefilter_ready", ready},
+		{"aitagent_process_config_refresh_inflight", refreshing},
+		{"aitagent_process_inflight", active},
+		{"aitagent_process_oldest_work_seconds", oldest},
+		{"aitagent_process_overdue_commands", overdue},
+		{"aitagent_process_cooldown_seconds", cooldown},
+	}
 	for _, metric := range []struct {
 		name  string
 		value uint64
@@ -254,6 +273,7 @@ func (p *Plugin) ServeMetrics(_ *plugin.Context, w http.ResponseWriter, r *http.
 		{"observed_storage_errors", g.storageErrors.Load()}, {"uncertain_writes", g.uncertainWrites.Load()},
 		{"prefilter_rejected", g.prefilterRejected.Load()}, {"config_refresh_failed", g.configRefreshFailed.Load()},
 	} {
-		fmt.Fprintf(w, "aitagent_process_%s_total %d\n", metric.name, metric.value)
+		metrics = append(metrics, localMetric{"aitagent_process_" + metric.name + "_total", metric.value})
 	}
+	return metrics
 }
