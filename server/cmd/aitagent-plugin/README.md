@@ -1,4 +1,90 @@
-# AI-TAgent local request intake (0.2.9)
+# AI-TAgent local request intake (0.2.10)
+
+## Durable bounded cancellation retries and confirmation (0.2.10)
+
+The offline chain now persists a cancellation job linked to the original sender
+identity. It can recover when cancellation arrives before the receiver commits
+intake: the first query remains unresolved, a later due attempt queries the same
+identity again, and only an independently authenticated receiver inspection of
+`cancelled` or `expired` records terminal confirmation. A propagation response,
+missing row, timeout or expired lease is never sufficient confirmation. No result
+means an external action was undone or a task was successfully executed.
+
+### Persistence and recovery contract
+
+`QueueCancellation` checks explicit cancellation permission and a fresh trusted
+source cancellation observation before storing the original fingerprint and source
+revision as metadata. It checks permission again in the transaction. This captured
+observation is **not reusable authorization**. Every propagation attempt still uses
+the receiver adapter's live source and local permission checks; the source cannot
+be replaced with the queued observation. Cancellation queue rights are a separate
+required adapter: `NewOfflineOutbox` alone cannot use the queue.
+
+`DueCancellations` returns at most 16 currently authorized keys in the pinned
+organization/employee/actor scope. Discovery requires explicit scope permission
+(empty candidate delivery key), then per-key permission. These are hints, not
+claims. `RetryCancellation` performs one due attempt and rechecks permission;
+there is no automatic polling loop, plugin worker, HTTP route or network client.
+The isolated source → journal → inbox → cancellation → confirmation test actually
+calls these components; none is enabled for real accounts or execution.
+
+A claim increments the durable attempt counter, writes its audit event and commits
+a random lease token before any receiver call. Unknown claim commits make **no
+receiver call**. The database sets a five-second lease; acknowledgements require
+the matching token, attempt and an unexpired lease. No DB lock is held across the
+adapter call. An expired worker can overlap a new worker if its RPC ignores context,
+but its late result cannot overwrite the newer attempt. Receiver cancellation is
+identity-bound, revision-checked and terminal/idempotent; this mechanism must not
+be reused as an execution lease or exactly-once action mechanism.
+
+A completed unsuccessful attempt persists exponential retry delays of 1–60 seconds
+using database time. Up to 16 claims are allowed, including claims whose worker
+crashes before calling the receiver. Exhaustion becomes `attention`, **not success**;
+a last-claim crash becomes attention after lease expiry. Duplicate enqueue never
+resets attempts. A confirmed job stores which terminal state was observed. Its
+confirmation is historical, not proof of current service authorization or remote
+execution results. Sender cancellation permission is checked again before storing
+confirmation. Current receiver inspection is independently authorized.
+
+State changes and audit events commit together. The kernel checks the initial
+queue event, every sequential claim and the last recorded outcome. An absent old
+acknowledgement can mean a crashed worker, so this does not establish a complete
+owner-resistant history. Runtime roles cannot delete audit or change identity,
+and cannot reset terminal jobs. A schema owner/superuser remains trusted. During
+normal kernel operation a job has at most 33 events. No goal, signed proof, secret
+or raw RPC error is persisted.
+
+### What recovery does and does not cover
+
+A fresh OS test process opens new restricted-role PostgreSQL connections, discovers
+a persisted due key and confirms its late-arriving receiver record. Tests also
+cover concurrent claimants, old-worker fencing, lost claim/receiver/confirmation
+acknowledgements, separate cancellation permission, permission revocation during
+confirmation, wrong identity, missing audit, audit-write rollback and evidence
+failure through retry exhaustion. Fixture-only owner operations age due dates and
+leases to simulate elapsed time without changing system clocks. This is process
+recovery against a running isolated database, **not** PostgreSQL restart, disk loss,
+replica promotion, backup restore or live Mattermost/Octop service recovery.
+
+The source receipt and its association still expire through seven-day lazy cleanup.
+If fresh source evidence or permission disappears before receiver cancellation,
+the job remains unresolved and may exhaust its retries. Queued metadata cannot
+bypass that loss. Existing sender capacity bounds jobs to 128 permanent identities;
+there is no cleanup, deletion, evidence archival or manual reset API. Retry pacing,
+limits, retention, alerting and an authorized operator recovery procedure require
+production design. `attention` must not be silently retried forever or deleted to
+restore capacity. There is no automatic monitor to notify an operator today.
+
+The new SQL is an explicit isolated schema, not an upgrade migration. Source JSON
+still requires stopping old writers that can discard the association; restoring or
+downgrading databases must preserve queue/audit/outbox identity history. No schema
+version negotiation, restore epoch or safe rolling upgrade is supplied. Claims
+and confirmations are local transactions; source and receiver changes are not
+atomic with them. Authenticated service adapters, secure transport, deployment
+admission/fairness, cooperative RPC cancellation, scheduling/operations and true
+two-service tests remain 1.0 gates. Real sending and execution remain unwired and
+closed. The older source, privacy, capacity and cancellation-race limitations below
+remain unless explicitly superseded by this bounded offline retry kernel.
 
 ## Same-receipt association and offline cancellation propagation (0.2.9)
 

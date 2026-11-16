@@ -26,7 +26,7 @@ func TestOfflinePGSourceToPendingInbox(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	_, err = db.Exec(`DROP TABLE IF EXISTS aitagent_outbox_audit,aitagent_outbox,aitagent_outbox_guard,aitagent_capacity_guard,aitagent_intake_audit,aitagent_intake,aitagent_test_receiver CASCADE;` + handoff.OfflineInboxSchema + handoff.OfflineOutboxSchema + `
+	_, err = db.Exec(`DROP TABLE IF EXISTS aitagent_cancel_queue_audit,aitagent_cancel_queue,aitagent_outbox_audit,aitagent_outbox,aitagent_outbox_guard,aitagent_capacity_guard,aitagent_intake_audit,aitagent_intake,aitagent_test_receiver CASCADE;` + handoff.OfflineInboxSchema + handoff.OfflineOutboxSchema + handoff.OfflineCancelQueueSchema + `
  CREATE TABLE aitagent_test_receiver(actor bigint,org text,worker text,key_id text,enabled boolean);
  INSERT INTO aitagent_test_receiver VALUES(42,'target-org','target-worker','test-key',true);`)
 	if err != nil {
@@ -69,7 +69,7 @@ func TestOfflinePGSourceToPendingInbox(t *testing.T) {
 	}
 	inbox := handoff.NewOfflineInbox(true, db, authorize)
 	source := p.handoffSourceReader(sourceBinding{Enabled: true, Binding: i.Binding})
-	outbox := handoff.NewOfflineOutbox(true, db, handoff.OutboxAuthorizer(authorize))
+	outbox := handoff.NewOfflineOutboxWithCancellation(true, db, handoff.OutboxAuthorizer(authorize), handoff.CancellationAuthorizer(authorize))
 	if o := outbox.Prepare(context.Background(), proof, policy, func() int64 { return now / 1000 }, source); o != handoff.OutboxPrepared {
 		t.Fatal(o)
 	}
@@ -115,7 +115,13 @@ func TestOfflinePGSourceToPendingInbox(t *testing.T) {
 		t.Fatal("reconciliation lost blocked state", stored, outcome)
 	}
 	workNow = workNow.Add(time.Minute) // advance only synthetic admission clock
-	if got := machine.PropagateCancellation(context.Background(), candidate.DeliveryKey, policy, 4, digest("source-cancel"), p.handoffCancellationReader(trusted, r.ID)); got != handoff.ReviewCancelled {
+	if got := outbox.QueueCancellation(context.Background(), candidate.DeliveryKey, policy, p.handoffCancellationReader(trusted, r.ID)); got != handoff.CancelQueued {
+		t.Fatal(got)
+	}
+	target := handoff.CancellationTarget{Inspect: machine.Inspect, Cancel: func(ctx context.Context, k string, pcy handoff.Policy, rev int64, op string) handoff.ReviewOutcome {
+		return machine.PropagateCancellation(ctx, k, pcy, rev, op, p.handoffCancellationReader(trusted, r.ID))
+	}}
+	if got := outbox.RetryCancellation(context.Background(), candidate.DeliveryKey, policy, target); got != handoff.CancelConfirmed {
 		t.Fatal(got)
 	}
 	if o := outbox.Reconcile(context.Background(), candidate.DeliveryKey, policy, machine.Inspect); o != handoff.OutboxRecorded {

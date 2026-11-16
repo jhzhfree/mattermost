@@ -39,14 +39,15 @@ type ReceiverInspector func(context.Context, string, Policy) (StoredState, Revie
 // Outbox persists only identity/target metadata, never goal, proof or keys.
 // There is no sender, scheduler, credentials, endpoint or execution capability.
 type Outbox struct {
-	enabled   bool
-	db        *sql.DB
-	authorize OutboxAuthorizer
-	commit    func(*sql.Tx) error
+	cancelAuthorize CancellationAuthorizer
+	enabled         bool
+	db              *sql.DB
+	authorize       OutboxAuthorizer
+	commit          func(*sql.Tx) error
 }
 
 func NewOfflineOutbox(enabled bool, db *sql.DB, auth OutboxAuthorizer) *Outbox {
-	return &Outbox{enabled, db, auth, func(tx *sql.Tx) error { return tx.Commit() }}
+	return &Outbox{enabled: enabled, db: db, authorize: auth, commit: func(tx *sql.Tx) error { return tx.Commit() }}
 }
 func (s *Outbox) ready(ctx context.Context, p Policy) bool {
 	return s != nil && s.enabled && s.db != nil && s.authorize != nil && ctx != nil && ctx.Err() == nil && p.Enabled && p.OctopActorID > 0 && opaqueID(p.OctopOrganizationID) && opaqueID(p.OctopEmployeeID)
