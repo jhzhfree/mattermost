@@ -1,4 +1,4 @@
-"""Execute Go-signed requests against unmodified Octop 247b456 ASGI/SQLite code.
+"""Execute Go-signed requests against unmodified Octop 0e950452 ASGI/SQLite code.
 
 No source checkout changes, no production app, no socket/TLS or real credentials.
 Dependencies must already be installed; this runner never installs or fetches.
@@ -18,7 +18,7 @@ import sys
 import tarfile
 import tempfile
 
-REVISION = "247b4567f2feb20756f79cc9a461b2daa118c116"
+REVISION = "0e9504525601ed16aae154b778582d6e0ec5d8ab"
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -50,14 +50,14 @@ async def exercise(fixture, directory):
         c.execute("INSERT INTO organization_assignments(assignment_id,position_id,subject_type,subject_id,created_at) VALUES('contract-assignment','contract-position','agent','contract-agent',1)")
         c.execute("INSERT INTO digital_workers(worker_id,organization_id,position_id,agent_id,owner_user_id,name,status,capabilities_json,created_at,updated_at) VALUES(?,?,'contract-position','contract-agent',?,'Synthetic worker','active','{}',1,1)", (worker, org, actor))
         c.execute("INSERT INTO mattermost_brokers VALUES(?,?,1,1,?,?,?,1,?,?,?)", ("fixture-broker", fixture["broker_public_key"], org, worker, actor, policy["KeyID"], base64.b64decode(policy["PublicKey"]).hex(), json.dumps(policy["Binding"])))
-    state = {"now": fixture["now"], "cancelled": False, "error": False, "calls": 0}
+    state = {"now": fixture["now"], "cancelled": False, "error": False, "calls": 0, "fresh": False}
 
     async def source(mapping, receipt):
         state["calls"] += 1
         assert mapping["broker_id"] == "fixture-broker"
         if state["error"]:
             raise RuntimeError("synthetic source unavailable")
-        x = fixture["cancelled"] if state["cancelled"] else fixture["active"]
+        x = fixture["cancelled"] if state["cancelled"] else fixture["fresh_active"] if state["fresh"] else fixture["active"]
         return SourceObservation(delivery_key=x["DeliveryKey"], fingerprint=x["Fingerprint"],
             commitment=x["Commitment"], state="cancelled" if state["cancelled"] else x["State"],
             receipt_expires_at=x["ReceiptExpiresAt"], version=x["Version"])
@@ -79,9 +79,10 @@ async def exercise(fixture, directory):
         assert response.headers["cache-control"] == "no-store"
         value = response.json()
         if status in (200, 201):
-            assert set(value) == {"protocol_version", "delivery_key", "fingerprint", "state", "revision", "source_version", "execution_authorized"}
+            assert set(value) == {"protocol_version", "delivery_key", "fingerprint", "state", "revision", "source_version", "state_source_version", "execution_authorized"}
             assert value["delivery_key"] == fixture["delivery_key"] and value["fingerprint"] == fixture["fingerprint"]
             assert value["execution_authorized"] is False and isinstance(value["source_version"], str)
+            assert isinstance(value["state_source_version"], str) and int(value["source_version"]) >= int(value["state_source_version"])
         if status not in (200, 201):
             assert set(value) == {"code"} and isinstance(value["code"], str), value
         results.append({"case": label or name, "http_status": status, "code": value.get("code")})
@@ -103,6 +104,7 @@ async def exercise(fixture, directory):
         state["error"] = False
         await send("source_error", 409, label="failed_business_nonce_replay")  # failed business call did not refund nonce
         first = await send("create", 201)
+        assert first["source_version"] == first["state_source_version"] == str(fixture["active"]["Version"])
         duplicate = await send("duplicate", 200)
         assert first == duplicate and first["state"] == "pending_authorization"
         await send("create", 409, label="accepted_nonce_replay")
@@ -113,13 +115,24 @@ async def exercise(fixture, directory):
         with db.transaction() as c:
             c.execute("UPDATE users SET permissions='[\"tasks\"]' WHERE id=?", (actor,))
         await send("bad_cancel", 422)
-        await send("cancel_not_ready", 403)
+        state["fresh"] = True
+        assert (await send("cancel_not_ready", 403))["code"] == "SOURCE_AUTHORITY_CHANGED"
+        rejected = await send("inspect_after_rejected_cancel", 200)
+        assert rejected["state"] == "pending_authorization" and rejected["revision"] == 1
+        assert int(rejected["source_version"]) == fixture["fresh_active"]["Version"]
+        assert rejected["state_source_version"] == first["state_source_version"]
         state["cancelled"] = True
+        assert (await send("cancel_conflict", 409))["code"] == "INTAKE_REVISION_CONFLICT"
+        conflict = await send("inspect_after_conflict", 200)
+        assert conflict["state"] == "pending_authorization" and conflict["revision"] == 1
+        assert int(conflict["source_version"]) == fixture["cancelled"]["Version"]
+        assert conflict["state_source_version"] == first["state_source_version"]
         cancelled = await send("cancel", 200)
         assert cancelled["state"] == "cancelled" and cancelled["revision"] == 2
+        assert cancelled["source_version"] == cancelled["state_source_version"] == str(fixture["cancelled"]["Version"])
         assert await send("cancel_duplicate", 200) == cancelled
         state["cancelled"] = False  # stale/re-enabled active observation cannot revive identity
-        await send("revive", 410)
+        assert (await send("revive", 409))["code"] == "SOURCE_VERSION_REWOUND"
         state["cancelled"] = True
         db.close()
         db = SqlitePool(dbpath)
@@ -135,10 +148,11 @@ async def exercise(fixture, directory):
         with db.connect() as c:
             count = c.execute("SELECT count(*) FROM mattermost_intakes").fetchone()[0]
             audit = c.execute("SELECT count(*) FROM audit_log WHERE action LIKE 'mattermost.intake.%'").fetchone()[0]
+            observed_audit = c.execute("SELECT count(*) FROM audit_log WHERE action='mattermost.source_observed'").fetchone()[0]
             schema = c.execute("SELECT version FROM _schema_version").fetchone()[0]
-        assert count == 1 and audit == 2, (count, audit)
+        assert count == 1 and audit == 2 and observed_audit == 2 and schema == 46, (count, audit, observed_audit, schema)
         return {"status": "passed", "octop_revision": REVISION, "cases": results,
-                "intake_rows": count, "ingress_audit_rows": audit, "schema_version": schema,
+                "intake_rows": count, "ingress_audit_rows": audit, "schema_version": schema, "observation_audit_rows": observed_audit,
                 "source": "Go fake-plugin-API snapshots, not a live source service",
                 "receiver": "unmodified Octop ASGI/service/repository/SQLite migrations",
                 "tls_tested": False, "production_mounted": False, "execution_enabled": False,

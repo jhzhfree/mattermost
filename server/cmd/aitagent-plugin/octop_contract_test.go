@@ -31,6 +31,10 @@ func TestExportOctopContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	freshActive, err := p.handoffSourceReader(b)(context.Background(), b.Binding, r.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err = p.lookup(r.ID, f.config, args, true); err != nil {
 		t.Fatal(err)
 	}
@@ -69,16 +73,18 @@ func TestExportOctopContract(t *testing.T) {
 	for _, name := range []string{"create", "duplicate", "revoked", "source_error", "revive"} {
 		add(name, "POST", base, proof, now)
 	}
-	for _, name := range []string{"inspect", "inspect_after_restart", "wrong_body", "wrong_path", "missing_auth"} {
+	for _, name := range []string{"inspect", "inspect_after_restart", "wrong_body", "wrong_path", "missing_auth", "inspect_after_rejected_cancel", "inspect_after_conflict"} {
 		add(name, "GET", item, nil, now)
 	}
 	add("expired_auth", "GET", item, nil, now-30)
 	add("cancel_not_ready", "POST", item+"/cancellations", cancelBody, now)
+	wrongRevision, _ := json.Marshal(map[string]any{"operation_id": digest("wrong-revision"), "expected_revision": 2})
+	add("cancel_conflict", "POST", item+"/cancellations", wrongRevision, now)
 	add("cancel", "POST", item+"/cancellations", cancelBody, now)
 	add("cancel_duplicate", "POST", item+"/cancellations", cancelBody, now)
 	add("inspect_expired_proof", "GET", item, nil, now+61)
 	add("bad_cancel", "POST", item+"/cancellations", []byte(`{"operation_id":"bad","expected_revision":1,"actor_id":1}`), now)
-	out := map[string]any{"now": now, "policy": policy, "broker_public_key": hex.EncodeToString(pub), "active": active, "cancelled": cancelled, "requests": requests, "delivery_key": candidate.DeliveryKey, "fingerprint": candidate.Fingerprint}
+	out := map[string]any{"now": now, "policy": policy, "broker_public_key": hex.EncodeToString(pub), "active": active, "fresh_active": freshActive, "cancelled": cancelled, "requests": requests, "delivery_key": candidate.DeliveryKey, "fingerprint": candidate.Fingerprint}
 	data, err := json.Marshal(out)
 	if err != nil {
 		t.Fatal(err)

@@ -1,4 +1,31 @@
-# Isolated Go ↔ Octop contract verification (0.2.13)
+# Isolated Go ↔ Octop contract verification
+
+## Current runner: 0.2.15 / Octop 0e950452
+
+The runner now pins **0e9504525601ed16aae154b778582d6e0ec5d8ab**, schema 046.
+Successful responses contain eight fields: the original seven below plus decimal
+string `state_source_version`. `source_version` is now the highest persisted
+observation, whereas `state_source_version` is the version of the last business
+transition. Observing a newer version need not change state or revision.
+The 403 active-source cancellation and 409 wrong-revision cancellation cases now
+query the original identity and assert the higher observation persisted while
+business state/version stayed unchanged. Stale-active resubmission is 409, not 410.
+Expected totals: 24 HTTP attempts, one intake, two business audit rows and two
+`mattermost.source_observed` rows. Source values are genuine exported Go helper
+observations; transport/source timing remain simulated. No live sender parser is
+installed. Error responses must never be treated as proof of no persistence.
+
+Schema 046 disables pre-existing brokers with intake rows because historical
+higher observations cannot be reconstructed. This runner creates a fresh database;
+it does not validate migration recovery, re-enablement or peer PostgreSQL roles.
+Do not simply enable old brokers. A trusted history/epoch strategy is still needed.
+
+The commands below run the new pin when using current code. To reproduce the old
+247b456 result use the historical Mattermost 14759deb87 runner. Deployment/authority
+consistency limitations are in [DEPLOYMENT.md](DEPLOYMENT.md).
+
+## Historical 0.2.13 / 247b456 evidence
+
 
 Pinned receiver: [Octop 247b4567f2feb20756f79cc9a461b2daa118c116](https://github.com/jhzhfree/Octop/tree/247b4567f2feb20756f79cc9a461b2daa118c116).
 This supersedes the **historical** c9fd4021 ingress-absent finding in PROTOCOL.md.

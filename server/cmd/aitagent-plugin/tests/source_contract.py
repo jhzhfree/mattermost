@@ -15,7 +15,7 @@ import tarfile
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-REVISION = '43506ab70675efd82d793a7ee6d9bc3e8de55436'
+REVISION = '0e9504525601ed16aae154b778582d6e0ec5d8ab'
 
 
 def deny(*args, **kwargs):

@@ -1,4 +1,15 @@
-# AI-TAgent local request intake (0.2.14)
+# AI-TAgent local request intake (0.2.15)
+
+## Real-instance readiness and peer watermark contract (0.2.15)
+
+[DEPLOYMENT.md](DEPLOYMENT.md) provides a reproducible blocked preflight, exact
+route/identity mapping and staged acceptance matrix. A real server build is blocked
+by missing modules and official storage access; source authorization APIs can use
+caches/replicas, so ledger CAS does not establish primary authorization. Runtime
+reservation, source route and trust/transport composition remain absent.
+The current isolated ingress contract pins Octop **0e950452** and distinguishes
+observation high-watermark `source_version` from `state_source_version`, including
+persisted observations after 403/409. No live service or execution is enabled.
 
 ## Authenticated current source observations (0.2.14)
 

@@ -1,4 +1,8 @@
-# Current source query boundary (0.2.14)
+# Current source query boundary (0.2.14; deployment limits updated in 0.2.15)
+
+See [DEPLOYMENT.md](DEPLOYMENT.md): primary ledger CAS does not guarantee primary
+authorization reads; the rechecked plugin APIs may use cached/replica views. Current
+source-contract runner pins 0e950452; 43506ab below is the original protocol baseline.
 
 Pinned peer: [Octop 43506ab70675efd82d793a7ee6d9bc3e8de55436](https://github.com/jhzhfree/Octop/tree/43506ab70675efd82d793a7ee6d9bc3e8de55436),
 `docs/ai-tagent/mattermost-source-adapter.md` and
