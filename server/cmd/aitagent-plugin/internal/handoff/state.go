@@ -35,6 +35,8 @@ const (
 // StoredState is historical metadata only. None of its states is a runnable
 // permission, approval, lease, or token. Inspect is independent of source expiry.
 type StoredState struct {
+	DeliveryKey         string
+	Fingerprint         string
 	State               string
 	Revision            int64
 	SourceVersion       uint64
@@ -98,12 +100,14 @@ func loadState(ctx context.Context, tx *sql.Tx, key string) (Candidate, StoredSt
 	c := Candidate{DeliveryKey: key}
 	var state StoredState
 	err := tx.QueryRowContext(ctx, `SELECT fingerprint,organization_id,employee_id,actor_id,source_expires_at,state,revision,source_version FROM aitagent_intake WHERE delivery_key=$1 FOR UPDATE`, key).Scan(&c.Fingerprint, &c.OctopOrganizationID, &c.OctopEmployeeID, &c.OctopActorID, &c.Intent.ReceiptExpiresAt, &state.State, &state.Revision, &state.SourceVersion)
+	state.DeliveryKey, state.Fingerprint = c.DeliveryKey, c.Fingerprint
 	return c, state, err
 }
 func loadSnapshot(ctx context.Context, tx *sql.Tx, key string) (Candidate, StoredState, error) {
 	c := Candidate{DeliveryKey: key}
 	var state StoredState
 	err := tx.QueryRowContext(ctx, `SELECT fingerprint,organization_id,employee_id,actor_id,source_expires_at,state,revision,source_version FROM aitagent_intake WHERE delivery_key=$1`, key).Scan(&c.Fingerprint, &c.OctopOrganizationID, &c.OctopEmployeeID, &c.OctopActorID, &c.Intent.ReceiptExpiresAt, &state.State, &state.Revision, &state.SourceVersion)
+	state.DeliveryKey, state.Fingerprint = c.DeliveryKey, c.Fingerprint
 	return c, state, err
 }
 func targetMatches(c Candidate, p Policy) bool {

@@ -1,4 +1,72 @@
-# AI-TAgent local request intake (0.2.7)
+# AI-TAgent local request intake (0.2.8)
+
+## Offline sender journal and identity-bound reconciliation (0.2.8)
+
+This phase adds a **partial outbox kernel**, called by isolated PostgreSQL tests.
+It is not a production sender outbox: no plugin route, network client, scheduler,
+executor, credentials or automatic migration is added. Default constructors deny
+work. The existing plugin settings cannot enable this kernel. Only test code
+uses its successful attempt result to call the local `Inbox.Accept` simulation.
+
+`Prepare` verifies a signed proof and live source observation, checks independent
+sender permission, and durably reserves the original delivery key, fingerprint,
+target and source expiry with an audit event. It persists no goal, proof, token or
+key. Existing identities cannot be repurposed. `BeginAttempt` repeats proof/source,
+clock and local permission checks, locks that row and commits `delivery_unknown`
+plus its audit **before** the test caller invokes the receiver. Concurrent callers
+cannot each acquire an initial attempt. An unknown sender commit never permits a
+receiver call. Once this phase is recorded, no API resets it to prepared or grants
+a second attempt. Permission callbacks must capture a trusted authenticated local
+caller; mapped actor IDs and chat content are not credentials.
+
+`Reconcile` checks current sender authorization, then calls an independently
+authenticated receiver inspector without holding sender transaction locks, and
+checks sender authorization again before recording the result. `Inspect` now
+returns the stored delivery key and fingerprint, including after audit compaction;
+the sender requires both to match its durable record. It does not need a still-valid
+proof or a reachable source, so a receiver commit can be confirmed after source
+expiry or cancellation. `receiver_recorded` means only **historical existence**:
+a cancelled/expired/blocked receiver record also confirms delivery, never execution
+or current permission. This journal does not mirror receiver state or propagate
+cancellation. Missing, denied, unavailable or wrong-identity responses never prove
+non-delivery and never enable retransmission. No delivery acknowledgement alone
+updates the journal; the isolated path uses authenticated inspection instead.
+
+State transitions and audit append commit together; reads validate the bounded
+audit sequence. Receiver acknowledgement loss, sender acknowledgement loss,
+reconciliation acknowledgement loss and process-object restart retain the same
+identity. After a crash between recording an attempt and calling the receiver,
+the journal can remain unresolved forever: it deliberately sacrifices liveness
+rather than guess whether delivery happened. This is not exactly-once delivery.
+A safe retry protocol, receiver durable deduplication across restore epochs and
+authenticated absence/acceptance semantics still need a production design.
+
+The journal has a separate fixed **128 permanent identity** cap and three events
+per identity, with no cleanup or retry scheduler. It does not reuse the receiver's
+compaction policy. Retention/capacity management is an explicit unfinished gate;
+do not delete rows to restore sending. It does not durably preserve the payload
+needed for reconstruction, and its transaction is **not atomic with the Mattermost
+KV receipt**. Source-ledger crash recovery, payload retention, transactional outbox
+creation and cancellation propagation remain missing. The source may cancel just
+after the last observation; a negative race test demonstrates that recording the
+attempt cannot eliminate that gap. No result grants execution authority.
+
+The six new PostgreSQL tests use the restricted application role for journal
+operations, with column grants and immutable audit access; administrators install
+fixtures and inject faults only. They exercise unknown commits, original-identity
+reconciliation after expiry/compaction, absent receiver records, eight concurrent
+attempts, wrong fingerprints, permission revocation during reconciliation, audit
+failure/missing history, capacity, clock rewind and lock timeout. Sender and receiver
+use separate tables/connections in **one isolated database**, not independent live
+services or a distributed fault test. The source is simulated. The sender permission
+helper reuses synthetic fixture grants and is not a deployed identity adapter.
+SQL/context deadlines do not forcibly preempt an uncooperative callback; a future
+transport must implement bounded cooperative cancellation and process admission.
+
+The 0.2.7 receiver lifecycle limits, shared plugin budgets, blocking RPC limitation,
+upgrade constraints, source audit privacy and default-off execution all remain.
+The historical sections below describe earlier phases, not additional runtime
+capabilities enabled by this version.
 
 ## Offline inbox lifecycle and restricted database roles (0.2.7)
 
