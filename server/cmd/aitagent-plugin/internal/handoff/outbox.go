@@ -101,8 +101,8 @@ func (s *Outbox) Prepare(ctx context.Context, proof []byte, p Policy, now func()
 		last = n
 		return n
 	}
-	c, _, err := observeVerified(ctx, proof, p, checked, source)
-	if err != nil {
+	c, observation, err := observeVerified(ctx, proof, p, checked, source)
+	if err != nil || observation.DeliveryKey != c.DeliveryKey || observation.Fingerprint != c.Fingerprint {
 		return OutboxDenied
 	}
 	tx, err := s.transaction(ctx)
@@ -177,8 +177,8 @@ func (s *Outbox) BeginAttempt(ctx context.Context, proof []byte, p Policy, now f
 		last = n
 		return n
 	}
-	c, _, err := observeVerified(ctx, proof, p, checked, source)
-	if err != nil {
+	c, observation, err := observeVerified(ctx, proof, p, checked, source)
+	if err != nil || observation.DeliveryKey != c.DeliveryKey || observation.Fingerprint != c.Fingerprint {
 		return OutboxDenied
 	}
 	tx, err := s.transaction(ctx)

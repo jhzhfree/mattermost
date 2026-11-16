@@ -11,6 +11,7 @@ import (
 	"errors"
 	"os"
 	"testing"
+	"time"
 
 	_ "github.com/lib/pq"
 	"github.com/mattermost/mattermost/server/v8/cmd/aitagent-plugin/internal/handoff"
@@ -25,13 +26,15 @@ func TestOfflinePGSourceToPendingInbox(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	_, err = db.Exec(`DROP TABLE IF EXISTS aitagent_capacity_guard,aitagent_intake_audit,aitagent_intake,aitagent_test_receiver CASCADE;` + handoff.OfflineInboxSchema + `
+	_, err = db.Exec(`DROP TABLE IF EXISTS aitagent_outbox_audit,aitagent_outbox,aitagent_outbox_guard,aitagent_capacity_guard,aitagent_intake_audit,aitagent_intake,aitagent_test_receiver CASCADE;` + handoff.OfflineInboxSchema + handoff.OfflineOutboxSchema + `
  CREATE TABLE aitagent_test_receiver(actor bigint,org text,worker text,key_id text,enabled boolean);
  INSERT INTO aitagent_test_receiver VALUES(42,'target-org','target-worker','test-key',true);`)
 	if err != nil {
 		t.Fatal(err)
 	}
 	p, f, args := fixture()
+	workNow := time.Now()
+	p.workClock = func() time.Time { return workNow }
 	const now = int64(1800000000000)
 	p.clock = func() int64 { return now }
 	invoke(t, p, args)
@@ -60,8 +63,21 @@ func TestOfflinePGSourceToPendingInbox(t *testing.T) {
 		}
 		return nil
 	}
+	trusted := sourceBinding{Enabled: true, Binding: i.Binding}
+	if err := p.reserveHandoff(context.Background(), trusted, proof, policy); err != nil {
+		t.Fatal(err)
+	}
 	inbox := handoff.NewOfflineInbox(true, db, authorize)
 	source := p.handoffSourceReader(sourceBinding{Enabled: true, Binding: i.Binding})
+	outbox := handoff.NewOfflineOutbox(true, db, handoff.OutboxAuthorizer(authorize))
+	if o := outbox.Prepare(context.Background(), proof, policy, func() int64 { return now / 1000 }, source); o != handoff.OutboxPrepared {
+		t.Fatal(o)
+	}
+	if o := outbox.BeginAttempt(context.Background(), proof, policy, func() int64 { return now / 1000 }, source); o != handoff.OutboxAttempt {
+		t.Fatal(o)
+	}
+	workNow = workNow.Add(time.Minute)
+
 	accept := func() handoff.IntakeOutcome {
 		return inbox.Accept(context.Background(), proof, policy, func() int64 { return now / 1000 }, source)
 	}
@@ -98,8 +114,12 @@ func TestOfflinePGSourceToPendingInbox(t *testing.T) {
 	if outcome != handoff.ReviewRecorded || stored.State != "blocked" || stored.Revision != 4 {
 		t.Fatal("reconciliation lost blocked state", stored, outcome)
 	}
-	if got := machine.Cancel(context.Background(), candidate.DeliveryKey, policy, 4, digest("local-cancel")); got != handoff.ReviewCancelled {
+	workNow = workNow.Add(time.Minute) // advance only synthetic admission clock
+	if got := machine.PropagateCancellation(context.Background(), candidate.DeliveryKey, policy, 4, digest("source-cancel"), p.handoffCancellationReader(trusted, r.ID)); got != handoff.ReviewCancelled {
 		t.Fatal(got)
+	}
+	if o := outbox.Reconcile(context.Background(), candidate.DeliveryKey, policy, machine.Inspect); o != handoff.OutboxRecorded {
+		t.Fatal(o)
 	}
 	for table, want := range map[string]int{"aitagent_intake": 1, "aitagent_intake_audit": 5} {
 		var count int

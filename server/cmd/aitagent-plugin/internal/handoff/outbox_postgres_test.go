@@ -29,6 +29,13 @@ func outboxSetup(t *testing.T) (*lifecycleFixture, *Outbox) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	originalSource := f.source
+	f.source = func(ctx context.Context, b Binding, id string) (SourceRecord, error) {
+		r, err := originalSource(ctx, b, id)
+		r.DeliveryKey = f.candidate.DeliveryKey
+		r.Fingerprint = f.candidate.Fingerprint
+		return r, err
+	}
 	s := NewOfflineOutbox(true, f.app, func(ctx context.Context, tx *sql.Tx, p Policy, c Candidate) error {
 		return roleAuth(ctx, tx, p, c, ReviewAction("intake"))
 	})
@@ -250,6 +257,8 @@ func TestOfflinePGOutboxClockLockAndLastSourceReadBoundary(t *testing.T) {
 	cancelled := false
 	lastRead := func(context.Context, Binding, string) (SourceRecord, error) {
 		r := observeSource(f.i, "awaiting_octop_authorization")
+		r.DeliveryKey = f.candidate.DeliveryKey
+		r.Fingerprint = f.candidate.Fingerprint
 		cancelled = true
 		return r, nil
 	}
@@ -257,5 +266,31 @@ func TestOfflinePGOutboxClockLockAndLastSourceReadBoundary(t *testing.T) {
 	// Recording an attempt is not an execution grant, nor proof of current source.
 	if o := s.BeginAttempt(context.Background(), f.proof, f.p, func() int64 { return 101 }, lastRead); o != OutboxAttempt || !cancelled {
 		t.Fatal(o, cancelled)
+	}
+}
+
+func TestOfflinePGOutboxRequiresSameSourceAssociation(t *testing.T) {
+	f, s := outboxSetup(t)
+	missing := func(ctx context.Context, b Binding, id string) (SourceRecord, error) {
+		r, err := f.source(ctx, b, id)
+		r.DeliveryKey = ""
+		r.Fingerprint = ""
+		return r, err
+	}
+	if o := s.Prepare(context.Background(), f.proof, f.p, func() int64 { return 101 }, missing); o != OutboxDenied {
+		t.Fatal(o)
+	}
+	var count int
+	if err := f.admin.QueryRow("SELECT count(*) FROM aitagent_outbox").Scan(&count); err != nil || count != 0 {
+		t.Fatal(count, err)
+	}
+	prepareOutbox(t, f, s)
+	wrong := func(ctx context.Context, b Binding, id string) (SourceRecord, error) {
+		r, err := f.source(ctx, b, id)
+		r.Fingerprint = op(99)
+		return r, err
+	}
+	if o := s.BeginAttempt(context.Background(), f.proof, f.p, func() int64 { return 101 }, wrong); o != OutboxDenied {
+		t.Fatal(o)
 	}
 }

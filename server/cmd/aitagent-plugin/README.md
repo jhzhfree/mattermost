@@ -1,4 +1,99 @@
-# AI-TAgent local request intake (0.2.8)
+# AI-TAgent local request intake (0.2.9)
+
+## Same-receipt association and offline cancellation propagation (0.2.9)
+
+The isolated chain now calls the guarded Mattermost source adapter to reserve a
+handoff identity in the original receipt, prepares the sender journal, records an
+attempt, invokes the local receiver simulation, propagates source cancellation,
+and reconciles the original identity. No command, hook, HTTP route, configured
+worker, sender, signer or executor enables this path. All new methods remain
+unwired outside tests, with deployment-owned binding/policy and independent local
+authorization required. This remains pre-1.0, not a production integration.
+
+### Actual atomic boundary
+
+Repository `channels/store/sqlstore/plugin_store.go` implements `Get` on a replica.
+`SetWithOptions(Atomic:true, OldValue:...)` delegates to `CompareAndSet`, whose
+conditional update runs on the primary. The plugin's bounded `mutate` loop uses
+that exact old ledger value and advances its revision; it never treats a replica
+read alone as confirmation. This protects one KV key, **not** a transaction with
+PostgreSQL or another service. Replica lag may cause failure and commit errors
+may leave a successful write without an acknowledgement.
+
+The private `reserveHandoff` method checks the current proof, pinned mapping,
+current permissions and exact stored intent, then adds an immutable delivery key,
+fingerprint and binding digest inside the existing receipt's ledger CAS value.
+A conflicting reservation cannot replace it. This is an atomic **association with
+an existing request**, not simultaneous creation of the original request and a
+PostgreSQL outbox. A crash before reservation leaves the original receipt without
+an association and must not cause sending. Source observations now return this
+association when present. Sender `Prepare` and `BeginAttempt` both reject an absent
+or mismatching association, even if the proof and source state otherwise pass.
+
+Cancellation already updates the same receipt state and clears its goal in that
+same ledger CAS; it preserves the immutable association. There is deliberately
+no separately written cancellation flag which could diverge. The new guarded
+cancellation reader primary-confirms the association plus current cancelled state
+and revision without returning a goal or proof. A cancelled request cannot acquire
+a new reservation. Unknown reservation commits require rereading/reconciling that
+same receipt, never generating another identity.
+
+### Receiver cancellation and acknowledgement limits
+
+`PropagateCancellation` first checks local cancellation permission, releases DB
+locks, obtains an authenticated source observation, checks exact delivery key and
+fingerprint, then rechecks local permission and expected receiver revision. For a
+nonterminal row it requires a source revision newer than the last observation.
+It atomically records `cancelled` and a `source-cancel:` audit operation. A repeated
+confirmed cancellation cannot revive or duplicate the receiver transition. Unknown
+receiver commits are resolved by independent `Inspect`/same-identity retry; no
+compensating delete occurs. A terminal `expired` row stays expired. This fence
+cannot undo an external action, and no state grants permission to execute one.
+
+If cancellation propagation finds no receiver row while intake is in flight, it
+returns unavailable and creates no tombstone. That intake can subsequently commit
+a pending row after its earlier active-source observation. A negative concurrency
+test demonstrates that propagation must then be retried; the current kernel has no
+worker to guarantee this retry. This is another reason execution stays disabled.
+
+The cancellation reader is a trusted in-process adapter seam, not a network
+protocol, historical signed cancellation proof or user-supplied JSON. There is no
+service authenticator or transport. Revoked source access, disabled configuration,
+expired/pruned receipts, wrong binding or unavailable/lagging KV fail closed;
+those failures do not prove cancellation or absence. Since there is no independent
+service cancellation privilege yet, removing the original user's permission can
+also prevent cancellation propagation. This availability/security tradeoff blocks
+production enablement. Local receiver authorization is checked on both sides of
+the source call; the adapter must supply a real authenticated local principal.
+
+### Upgrade, retention and remaining gaps
+
+The optional source marker is created only by isolated test calls. Older plugin
+binaries can discard unknown JSON fields when rewriting the v2 ledger. Before any
+future use, **all old writers must be stopped and primary/replica state verified**;
+`QuotaStorageReady` is only an acknowledgement, not a migration or writer fence.
+No backfill or safe mixed-version rollout has been implemented. Do not enable a
+sender by merely adding this marker field to an old installation.
+
+Markers inherit the receipt's seven-day lazy pruning. An unresolved delivery or
+unpropagated cancellation may outlive that evidence; pruning is not acknowledgement.
+There is no cancellation scheduler, durable source acknowledgement, delivery scan,
+retention extension, sender journal cleanup or restore epoch. The sender's 128-row
+permanent cap and receiver's 4096-identity cap remain. These bounds, upgrade safety,
+source-ledger crash recovery, authentic service identities, secure transport,
+real two-service fault tests and safe execution remain 1.0 blockers. Source
+cancellation can still race after a successful observation. No cross-system
+atomicity, guaranteed cancellation delivery or exactly-once behavior is claimed.
+
+Tests exercise same-row association/cancellation, conflicting target mappings,
+CAS acknowledgement loss before/after commit, stale replicas, concurrent source
+reservation/cancellation, disabled/revoked/expired access, missing associations,
+receiver audit rollback, concurrent propagation and lost cancellation commits.
+The full source-to-receiver simulation uses fake plugin APIs and isolated PostgreSQL
+with administrator fixture setup; separate cancellation and sender cases use the
+restricted application role. This is not real Mattermost/Octop communication or
+production permission acceptance. Synthetic admission clocks are advanced in the
+long chain test to respect, rather than remove, existing status rate budgets.
 
 ## Offline sender journal and identity-bound reconciliation (0.2.8)
 

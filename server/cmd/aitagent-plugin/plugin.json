@@ -2,7 +2,7 @@
   "id": "com.aitagent.intake",
   "name": "AI-TAgent Request Intake",
   "description": "Local, explicitly authorized human request intake. No task execution or Octop delivery.",
-  "version": "0.2.8",
+  "version": "0.2.9",
   "min_server_version": "12.2.0",
   "server": {
     "executables": {

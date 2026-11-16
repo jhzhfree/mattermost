@@ -52,21 +52,22 @@ type configuration struct {
 // receipt captures a request, not approval or evidence of task execution.
 // The submitting human and the target digital employee are separate identities.
 type receipt struct {
-	ID             string `json:"id"`
-	Source         string `json:"source"`
-	OperationMode  string `json:"operation_mode"`
-	ActorUserID    string `json:"actor_user_id"`
-	OrganizationID string `json:"organization_id"`
-	EmployeeID     string `json:"employee_id"`
-	BotUserID      string `json:"bot_user_id"`
-	TeamID         string `json:"team_id"`
-	ChannelID      string `json:"channel_id"`
-	BindingHash    string `json:"binding_hash"`
-	Goal           string `json:"goal"`
-	GoalHash       string `json:"goal_hash"`
-	State          string `json:"state"`
-	CreatedAt      int64  `json:"created_at"`
-	ExpiresAt      int64  `json:"expires_at"`
+	Journal        *sourceJournal `json:"handoff_journal,omitempty"`
+	ID             string         `json:"id"`
+	Source         string         `json:"source"`
+	OperationMode  string         `json:"operation_mode"`
+	ActorUserID    string         `json:"actor_user_id"`
+	OrganizationID string         `json:"organization_id"`
+	EmployeeID     string         `json:"employee_id"`
+	BotUserID      string         `json:"bot_user_id"`
+	TeamID         string         `json:"team_id"`
+	ChannelID      string         `json:"channel_id"`
+	BindingHash    string         `json:"binding_hash"`
+	Goal           string         `json:"goal"`
+	GoalHash       string         `json:"goal_hash"`
+	State          string         `json:"state"`
+	CreatedAt      int64          `json:"created_at"`
+	ExpiresAt      int64          `json:"expires_at"`
 }
 
 func (p *Plugin) OnActivate() error {

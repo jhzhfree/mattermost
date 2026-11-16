@@ -181,6 +181,9 @@ func Verify(data []byte, p Policy, now int64) (Candidate, error) {
 // reader, not echoed from the proof or read from a stale replica/cache.
 // Pending is the only accepted state; missing/error/unknown outcomes fail closed.
 type SourceRecord struct {
+	// Optional same-row reservation; mandatory for the offline sender journal.
+	DeliveryKey      string
+	Fingerprint      string
 	Commitment       string
 	State            string
 	ReceiptExpiresAt int64

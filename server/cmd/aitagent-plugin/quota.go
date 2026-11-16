@@ -125,6 +125,9 @@ func (s *ledger) valid() bool {
 		return false
 	}
 	for id, r := range s.Receipts {
+		if r != nil && r.Journal != nil && !r.Journal.valid() {
+			return false
+		}
 		if r == nil || r.ID != id || !validReceiptID(id) || !model.IsValidId(r.ActorUserID) || r.OrganizationID == "" ||
 			r.CreatedAt <= 0 || r.CreatedAt > s.LastNow || r.ExpiresAt != r.CreatedAt+receiptTTL*1000 ||
 			(r.State != receiptState && r.State != cancelledState) {
