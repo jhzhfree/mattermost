@@ -1,4 +1,21 @@
-# AI-TAgent local request intake (0.2.10)
+# AI-TAgent local request intake (0.2.11)
+
+## Runnable automatic cancellation demonstration (0.2.11)
+
+Start with [DEMO.md](DEMO.md): it provides `make demo`, a machine-readable result,
+a fresh read-only review of Octop `f5efc2db`, and the gated two-service acceptance
+plan. The demo now automatically polls durable cancellation work rather than
+requiring the test to call each retry manually. It demonstrates late intake then
+automatic terminal confirmation in two attempts. This is an isolated simulation,
+not installed Mattermost/Octop services or a production connector.
+
+The scheduler is serial, single-scope, default-disabled and not wired to plugin
+startup. It preserves separate cancellation permissions, bounded discovery, claim
+fencing and retry limits. Local nonblocking events/statistics are not external
+alerts. Real source/receiver service authentication, executor-secret isolation,
+Octop ingress/migrations, runtime installation, operational recovery and live
+fault tests remain blockers. Execution, posting and production verification stay
+closed; no Octop source was modified and its tests were not run this round.
 
 ## Durable bounded cancellation retries and confirmation (0.2.10)
 

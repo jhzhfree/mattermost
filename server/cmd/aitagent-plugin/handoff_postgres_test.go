@@ -8,6 +8,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"os"
 	"testing"
@@ -121,9 +122,23 @@ func TestOfflinePGSourceToPendingInbox(t *testing.T) {
 	target := handoff.CancellationTarget{Inspect: machine.Inspect, Cancel: func(ctx context.Context, k string, pcy handoff.Policy, rev int64, op string) handoff.ReviewOutcome {
 		return machine.PropagateCancellation(ctx, k, pcy, rev, op, p.handoffCancellationReader(trusted, r.ID))
 	}}
-	if got := outbox.RetryCancellation(context.Background(), candidate.DeliveryKey, policy, target); got != handoff.CancelConfirmed {
-		t.Fatal(got)
+	scheduler := handoff.NewOfflineCancellationScheduler(true, outbox, policy, target, time.Second)
+	schedulerCtx, stopScheduler := context.WithTimeout(context.Background(), 5*time.Second)
+	defer stopScheduler()
+	schedulerDone := make(chan error, 1)
+	go func() { schedulerDone <- scheduler.Run(schedulerCtx) }()
+	select {
+	case event := <-scheduler.Events():
+		if event.Outcome != handoff.CancelConfirmed {
+			t.Fatal(event)
+		}
+	case <-schedulerCtx.Done():
+		t.Fatal("automatic source cancellation timeout")
 	}
+	stopScheduler()
+	<-schedulerDone
+	report, _ := json.Marshal(map[string]any{"scenario": "source_adapter_chain", "real_services": false, "source": "fake_mattermost_plugin_api", "receiver": "standalone_postgresql", "receipt_association": true, "automatic_confirmation": true, "execution_enabled": false, "outbound_enabled": false})
+	t.Logf("AITAGENT_DEMO %s", report)
 	if o := outbox.Reconcile(context.Background(), candidate.DeliveryKey, policy, machine.Inspect); o != handoff.OutboxRecorded {
 		t.Fatal(o)
 	}
