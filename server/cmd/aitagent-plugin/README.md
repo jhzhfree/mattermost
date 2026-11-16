@@ -1,4 +1,22 @@
-# AI-TAgent local request intake (0.2.11)
+# AI-TAgent local request intake (0.2.12)
+
+## Peer protocol audit: integration remains blocked (0.2.12)
+
+[PROTOCOL.md](PROTOCOL.md) separates the eight existing Octop APIs at reviewed
+commit `c9fd4021` from a proposed, **unimplemented** incoming handoff contract.
+The machine-readable [snapshot](protocol/octop-contract.json) and local-only
+[source checker](protocol/check_octop_contract.py) reproduce known incompatibility:
+current user-session configuration/publication APIs cannot consume the plugin
+proof or provide original-receipt inspection/cancellation. The checker uses no
+credentials, HTTP or source-module execution; a successful blocker check never
+means live compatibility. Default exit code 2 explicitly means blocked.
+
+This phase adds no runtime component or simulated endpoint. It documents exact
+identity, byte, error and retry requirements and the missing peer-side work.
+Octop production verification remains MockTransport-only; broker identity,
+secret isolation, ingress, storage migrations and live authentication remain gates.
+Only this repository is changed. Historical Octop snapshots below are superseded
+for this review by the pinned `c9fd4021` evidence, not by a live deployment claim.
 
 ## Runnable automatic cancellation demonstration (0.2.11)
 

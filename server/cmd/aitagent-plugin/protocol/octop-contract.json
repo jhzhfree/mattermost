@@ -1,0 +1,271 @@
+{
+  "schema_version": 1,
+  "octop_repository": "https://github.com/jhzhfree/Octop",
+  "octop_revision": "c9fd4021c47a8a06733a6787434fc7c60cbce91e",
+  "compatible": false,
+  "source_sha256": {
+    "src/octop/api/app.py": "6ca81ce465ca7d0304e27e3fca53f1e20ddda7c140c24a7712fd8d059338bd82",
+    "src/octop/api/deps.py": "36bb1e63f1799a078b3c4e39ca66afd846218e72145e0f9b161591d5718a9773",
+    "src/octop/api/routers/mattermost_publication.py": "4020961c2ff535dce9399655ccfa96accd2097469a34d8d1935cc5f59903f6df",
+    "src/octop/api/routers/digital_workers.py": "94fe8d7b9768c10f794323985b977d4e40292226b66c53a8d09d3bc2e0702799",
+    "src/octop/infra/digital_workers/mattermost.py": "15238c648d99b9164c9e587881da2c2e8025dc00fee528f305f360b41d5c9915",
+    "src/octop/infra/digital_workers/mattermost_verification.py": "f6bb7aba8070411fc6c1d971682e0c3c5fe64afdb6ba8be3830d60f971ad1319",
+    "src/octop/infra/scenes/mattermost_publication.py": "cc0e443180e0bb12ed8488c32fdbda080835d92d923991a66a234b4bba50d854",
+    "src/octop/infra/db/repos/mattermost_publications.py": "ed8a36338ad520b5eae1756e0634a8f68fb5b14f103d4c55a649d309647c23fa"
+  },
+  "existing_routes": [
+    {
+      "method": "GET",
+      "path": "/api/organizations/{organization_id}/scene-runs/{run_id}/mattermost-publication/candidate",
+      "handler": "get_publication_candidate",
+      "declares_current_user": true
+    },
+    {
+      "method": "GET",
+      "path": "/api/organizations/{organization_id}/scene-runs/{run_id}/mattermost-publication",
+      "handler": "get_publication",
+      "declares_current_user": true
+    },
+    {
+      "method": "POST",
+      "path": "/api/organizations/{organization_id}/scene-runs/{run_id}/mattermost-publication",
+      "handler": "preview_publication",
+      "declares_current_user": true
+    },
+    {
+      "method": "POST",
+      "path": "/api/organizations/{organization_id}/scene-runs/{run_id}/mattermost-publication/approve",
+      "handler": "approve_publication",
+      "declares_current_user": true
+    },
+    {
+      "method": "POST",
+      "path": "/api/organizations/{organization_id}/scene-runs/{run_id}/mattermost-publication/revoke",
+      "handler": "revoke_publication",
+      "declares_current_user": true
+    },
+    {
+      "method": "POST",
+      "path": "/api/organizations/{organization_id}/digital-workers/{worker_id}/mattermost-readiness",
+      "handler": "mattermost_readiness",
+      "declares_current_user": true
+    },
+    {
+      "method": "PUT",
+      "path": "/api/organizations/{organization_id}/digital-workers/{worker_id}/mattermost-intent",
+      "handler": "put_mattermost_intent",
+      "declares_current_user": true
+    },
+    {
+      "method": "GET",
+      "path": "/api/organizations/{organization_id}/digital-workers/{worker_id}/mattermost-intent",
+      "handler": "get_mattermost_intent",
+      "declares_current_user": true
+    }
+  ],
+  "existing_models": {
+    "PublicationPreviewBody": {
+      "fields": {
+        "expected_report_sha256": {
+          "annotation": "str",
+          "default_or_constraints": "Field(pattern='^[0-9a-f]{64}$')",
+          "required": true
+        },
+        "expected_worker_version": {
+          "annotation": "int",
+          "default_or_constraints": "Field(gt=0)",
+          "required": true
+        },
+        "expected_intent_revision": {
+          "annotation": "int",
+          "default_or_constraints": "Field(gt=0)",
+          "required": true
+        },
+        "expected_configuration_revision": {
+          "annotation": "int",
+          "default_or_constraints": "Field(gt=0)",
+          "required": true
+        }
+      },
+      "config": "ConfigDict(extra='forbid', strict=True)"
+    },
+    "PublicationDecisionBody": {
+      "fields": {
+        "expected_publication_sha256": {
+          "annotation": "str",
+          "default_or_constraints": "Field(pattern='^[0-9a-f]{64}$')",
+          "required": true
+        }
+      },
+      "config": "ConfigDict(extra='forbid', strict=True)"
+    },
+    "PublicationRecord": {
+      "fields": {
+        "organization_id": {
+          "annotation": "str",
+          "default_or_constraints": null,
+          "required": true
+        },
+        "run_id": {
+          "annotation": "str",
+          "default_or_constraints": null,
+          "required": true
+        },
+        "worker_id": {
+          "annotation": "str",
+          "default_or_constraints": null,
+          "required": true
+        },
+        "worker_version": {
+          "annotation": "int",
+          "default_or_constraints": null,
+          "required": true
+        },
+        "intent_revision": {
+          "annotation": "int",
+          "default_or_constraints": null,
+          "required": true
+        },
+        "configuration_revision": {
+          "annotation": "int",
+          "default_or_constraints": null,
+          "required": true
+        },
+        "instance_key": {
+          "annotation": "str",
+          "default_or_constraints": null,
+          "required": true
+        },
+        "team_id": {
+          "annotation": "str",
+          "default_or_constraints": null,
+          "required": true
+        },
+        "channel_id": {
+          "annotation": "str",
+          "default_or_constraints": null,
+          "required": true
+        },
+        "bot_id": {
+          "annotation": "str",
+          "default_or_constraints": null,
+          "required": true
+        },
+        "report_sha256": {
+          "annotation": "str",
+          "default_or_constraints": null,
+          "required": true
+        },
+        "publication_sha256": {
+          "annotation": "str",
+          "default_or_constraints": null,
+          "required": true
+        },
+        "content": {
+          "annotation": "str",
+          "default_or_constraints": null,
+          "required": true
+        },
+        "proposed_by": {
+          "annotation": "int",
+          "default_or_constraints": null,
+          "required": true
+        },
+        "approved_by": {
+          "annotation": "int | None",
+          "default_or_constraints": null,
+          "required": true
+        },
+        "status": {
+          "annotation": "Literal['pending_approval', 'blocked_not_connected', 'revoked', 'unknown']",
+          "default_or_constraints": null,
+          "required": true
+        },
+        "created_at": {
+          "annotation": "int",
+          "default_or_constraints": null,
+          "required": true
+        },
+        "updated_at": {
+          "annotation": "int",
+          "default_or_constraints": null,
+          "required": true
+        },
+        "connected": {
+          "annotation": "Literal[False]",
+          "default_or_constraints": null,
+          "required": true
+        },
+        "dispatch_enabled": {
+          "annotation": "Literal[False]",
+          "default_or_constraints": null,
+          "required": true
+        },
+        "execution_authorized": {
+          "annotation": "Literal[False]",
+          "default_or_constraints": null,
+          "required": true
+        }
+      },
+      "config": null
+    },
+    "MattermostReadinessRequest": {
+      "fields": {
+        "expected_worker_version": {
+          "annotation": "int",
+          "default_or_constraints": "Field(ge=1)",
+          "required": true
+        }
+      },
+      "config": "ConfigDict(extra='forbid', strict=True)"
+    },
+    "MattermostIntentRequest": {
+      "fields": {
+        "expected_worker_version": {
+          "annotation": "int",
+          "default_or_constraints": "Field(ge=1)",
+          "required": true
+        },
+        "expected_revision": {
+          "annotation": "int",
+          "default_or_constraints": "Field(ge=0)",
+          "required": true
+        },
+        "instance_key": {
+          "annotation": "str",
+          "default_or_constraints": "Field(pattern='^[a-z][a-z0-9-]{0,62}$')",
+          "required": true
+        },
+        "team_id": {
+          "annotation": "str",
+          "default_or_constraints": "Field(pattern='^[a-z0-9]{26}$')",
+          "required": true
+        },
+        "channel_id": {
+          "annotation": "str",
+          "default_or_constraints": "Field(pattern='^[a-z0-9]{26}$')",
+          "required": true
+        },
+        "bot_id": {
+          "annotation": "str",
+          "default_or_constraints": "Field(pattern='^[a-z0-9]{26}$')",
+          "required": true
+        },
+        "status": {
+          "annotation": "Literal['draft', 'revoked']",
+          "default_or_constraints": "'draft'",
+          "required": false
+        }
+      },
+      "config": "ConfigDict(extra='forbid', strict=True)"
+    }
+  },
+  "blockers": [
+    "No matching signed-intake/inspection/cancellation ingress found in reviewed Octop source",
+    "Octop user-session JWT is not a Mattermost proof or a broker identity",
+    "Production identity observation accepts MockTransport only; secret/executor isolation remains unresolved",
+    "Go canonical proof and source/inbox state schema are not implemented by Octop",
+    "Publication approval is outbound local review, not inbound task acceptance or send permission",
+    "Restore epochs, actual storage migrations and authenticated cancellation/unknown-result reconciliation require joint implementation"
+  ]
+}
