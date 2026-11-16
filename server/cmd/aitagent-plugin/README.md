@@ -1,6 +1,19 @@
-# AI-TAgent local request intake (0.2.12)
+# AI-TAgent local request intake (0.2.13)
 
-## Peer protocol audit: integration remains blocked (0.2.12)
+## Actual isolated peer contract (0.2.13)
+
+[INTEROP.md](INTEROP.md) pins Octop **247b456**, executes its unmodified ASGI,
+authentication and SQLite intake/cancel code with Go-signed requests, and documents
+21 HTTP attempts. It supersedes the old ingress-absent finding below. The source
+uses fake Mattermost API snapshots; neither installed services nor TLS is tested.
+Cancellation evidence now preserves original commitment and expiry in the source
+journal. Legacy associations fail closed for remote handoff. Real execution and
+sending remain disabled; identity isolation, live source authentication, deployment,
+capacity lifecycle and real dual-service acceptance are still required.
+
+## Historical peer protocol audit (0.2.12; superseded)
+
+The following findings apply only to c9fd4021, not to 247b456.
 
 [PROTOCOL.md](PROTOCOL.md) separates the eight existing Octop APIs at reviewed
 commit `c9fd4021` from a proposed, **unimplemented** incoming handoff contract.

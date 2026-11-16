@@ -158,3 +158,31 @@ func TestSourceJournalMissingDisabledAndExpiredFailClosed(t *testing.T) {
 		t.Fatal("expected lazy source expiry")
 	}
 }
+
+func TestLegacyJournalCannotExportAssociatedSourceOrCancellation(t *testing.T) {
+	p, f, args, proof, policy, b := journalFixture(t)
+	if err := p.reserveHandoff(context.Background(), b, proof, policy); err != nil {
+		t.Fatal(err)
+	}
+	state := readLedger(t, f)
+	id := readOnlyReceipt(t, f).ID
+	state.Receipts[id].Journal.Commitment = ""
+	raw, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.values[ledgerKey] = raw
+	active, err := p.handoffSourceReader(b)(context.Background(), b.Binding, id)
+	if err != nil || active.DeliveryKey != "" || active.Fingerprint != "" {
+		t.Fatal(active, err)
+	}
+	if err := p.reserveHandoff(context.Background(), b, proof, policy); err == nil {
+		t.Fatal("silently upgraded legacy association")
+	}
+	if _, err := p.lookup(id, f.config, args, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.handoffCancellationReader(b, id)(context.Background()); err == nil {
+		t.Fatal("fabricated legacy commitment")
+	}
+}

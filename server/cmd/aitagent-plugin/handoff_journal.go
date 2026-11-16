@@ -13,13 +13,14 @@ import (
 // It has no delivery/ack flag. Cancellation derives from the SAME receipt state,
 // never a second write. No command/runtime path creates these offline markers.
 type sourceJournal struct {
+	Commitment    string `json:"commitment,omitempty"`
 	DeliveryKey   string `json:"delivery_key"`
 	Fingerprint   string `json:"fingerprint"`
 	BindingDigest string `json:"binding_digest"`
 }
 
 func (j *sourceJournal) valid() bool {
-	return j != nil && validReceiptID(j.DeliveryKey) && validReceiptID(j.Fingerprint) && validReceiptID(j.BindingDigest)
+	return j != nil && validReceiptID(j.DeliveryKey) && validReceiptID(j.Fingerprint) && validReceiptID(j.BindingDigest) && (j.Commitment == "" || validReceiptID(j.Commitment))
 }
 func journalBinding(b handoff.Binding) string { raw, _ := json.Marshal(b); return digest(string(raw)) }
 
@@ -41,7 +42,7 @@ func (p *Plugin) reserveHandoff(ctx context.Context, trusted sourceBinding, proo
 		if err != nil || intent != fresh.Intent {
 			return handoff.ErrRejected
 		}
-		wanted := sourceJournal{DeliveryKey: fresh.DeliveryKey, Fingerprint: fresh.Fingerprint, BindingDigest: journalBinding(trusted.Binding)}
+		wanted := sourceJournal{Commitment: handoff.IntentCommitment(intent), DeliveryKey: fresh.DeliveryKey, Fingerprint: fresh.Fingerprint, BindingDigest: journalBinding(trusted.Binding)}
 		if r.Journal != nil && *r.Journal != wanted {
 			return handoff.ErrRejected
 		}
@@ -59,9 +60,9 @@ func (p *Plugin) reserveHandoff(ctx context.Context, trusted sourceBinding, proo
 func (p *Plugin) handoffCancellationReader(trusted sourceBinding, id string) handoff.CancellationReader {
 	return func(ctx context.Context) (handoff.CancellationEvidence, error) {
 		r, _, version, err := p.withHandoffReceipt(ctx, trusted, trusted.Binding, id, nil)
-		if err != nil || r.Journal == nil || r.Journal.BindingDigest != journalBinding(trusted.Binding) {
+		if err != nil || r.Journal == nil || r.Journal.Commitment == "" || r.Journal.BindingDigest != journalBinding(trusted.Binding) {
 			return handoff.CancellationEvidence{}, handoff.ErrRejected
 		}
-		return handoff.CancellationEvidence{DeliveryKey: r.Journal.DeliveryKey, Fingerprint: r.Journal.Fingerprint, Version: version, Cancelled: r.State == cancelledState}, nil
+		return handoff.CancellationEvidence{Commitment: r.Journal.Commitment, ReceiptExpiresAt: r.ExpiresAt, DeliveryKey: r.Journal.DeliveryKey, Fingerprint: r.Journal.Fingerprint, Version: version, Cancelled: r.State == cancelledState}, nil
 	}
 }

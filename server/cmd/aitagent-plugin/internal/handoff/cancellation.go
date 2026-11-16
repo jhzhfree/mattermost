@@ -9,10 +9,13 @@ import (
 // CancellationEvidence comes from an independently authenticated source adapter,
 // not client JSON or a signed old proof. It carries no goal or execution grant.
 type CancellationEvidence struct {
-	DeliveryKey string
-	Fingerprint string
-	Version     uint64
-	Cancelled   bool
+	// Original commitment survives source goal removal; required by Octop ingress.
+	Commitment       string
+	ReceiptExpiresAt int64
+	DeliveryKey      string
+	Fingerprint      string
+	Version          uint64
+	Cancelled        bool
 }
 type CancellationReader func(context.Context) (CancellationEvidence, error)
 

@@ -34,7 +34,7 @@ func (p *Plugin) handoffSourceReader(trusted sourceBinding) handoff.SourceReader
 			return handoff.SourceRecord{}, err
 		}
 		record := handoff.SourceRecord{Commitment: handoff.IntentCommitment(intent), State: r.State, ReceiptExpiresAt: r.ExpiresAt, Version: v}
-		if r.Journal != nil && r.Journal.BindingDigest == journalBinding(trusted.Binding) {
+		if r.Journal != nil && r.Journal.BindingDigest == journalBinding(trusted.Binding) && r.Journal.Commitment == record.Commitment {
 			record.DeliveryKey = r.Journal.DeliveryKey
 			record.Fingerprint = r.Journal.Fingerprint
 		}
