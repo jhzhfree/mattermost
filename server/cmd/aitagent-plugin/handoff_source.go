@@ -45,7 +45,7 @@ func (p *Plugin) handoffSourceReader(trusted sourceBinding) handoff.SourceReader
 // withHandoffReceipt shares guarded, primary-confirmed access for the offline
 // readers/reservation only. A callback mutates the SAME ledger value as receipt
 // state; it never performs an external action. No live route calls this helper.
-func (p *Plugin) withHandoffReceipt(ctx context.Context, trusted sourceBinding, requested handoff.Binding, id string, change func(*receipt, configuration, *model.CommandArgs, int64) error) (*receipt, configuration, uint64, error) {
+func (p *Plugin) withHandoffReceipt(ctx context.Context, trusted sourceBinding, requested handoff.Binding, id string, change func(*receipt, configuration, *model.CommandArgs, int64, *ledger) error) (*receipt, configuration, uint64, error) {
 	deny := func() (*receipt, configuration, uint64, error) { return nil, configuration{}, 0, handoff.ErrRejected }
 	if ctx == nil || ctx.Err() != nil || !trusted.Enabled || requested != trusted.Binding || !validReceiptID(id) {
 		return deny()
@@ -76,7 +76,7 @@ func (p *Plugin) withHandoffReceipt(ctx context.Context, trusted sourceBinding, 
 			return nil, errMissing
 		}
 		if change != nil {
-			if err := change(r, config, args, at); err != nil {
+			if err := change(r, config, args, at, s); err != nil {
 				return nil, err
 			}
 		}

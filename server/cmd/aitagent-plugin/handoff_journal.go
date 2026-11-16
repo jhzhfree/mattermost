@@ -33,7 +33,7 @@ func (p *Plugin) reserveHandoff(ctx context.Context, trusted sourceBinding, proo
 	if err != nil || policy.Binding != trusted.Binding {
 		return handoff.ErrRejected
 	}
-	_, _, _, err = p.withHandoffReceipt(ctx, trusted, c.Intent.Binding, c.Intent.Receipt, func(r *receipt, config configuration, args *model.CommandArgs, at int64) error {
+	_, _, _, err = p.withHandoffReceipt(ctx, trusted, c.Intent.Binding, c.Intent.Receipt, func(r *receipt, config configuration, args *model.CommandArgs, at int64, _ *ledger) error {
 		fresh, err := handoff.Verify(proof, policy, at/1000)
 		if err != nil {
 			return err

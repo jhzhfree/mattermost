@@ -1,4 +1,15 @@
-# AI-TAgent local request intake (0.2.13)
+# AI-TAgent local request intake (0.2.14)
+
+## Authenticated current source observations (0.2.14)
+
+[SOURCE.md](SOURCE.md) implements the isolated source query profile from Octop
+**43506ab**, with exact-byte broker authentication, nonce consumption in the same
+ledger CAS, current permissions and registry rechecks, challenge-bound signed
+responses, and cancellation identity preservation. The actual Python adapter
+verifies Go responses in the pipe-based contract test. Mattermost API/storage is
+still simulated. No HTTP route, key provider, real transport or execution is enabled.
+Old writers must be stopped before any future rollout; restore watermarks, trusted
+signer deployment, TLS and real primary/replica integration remain gates.
 
 ## Actual isolated peer contract (0.2.13)
 

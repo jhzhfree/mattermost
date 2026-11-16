@@ -39,10 +39,11 @@ var (
 // committed without its receipt, or released without its cancellation.
 // Revision prevents ABA when the content otherwise returns to an earlier state.
 type ledger struct {
-	Version  int                 `json:"version"`
-	Revision uint64              `json:"revision"`
-	LastNow  int64               `json:"last_now"`
-	Receipts map[string]*receipt `json:"receipts"`
+	SourceNonces map[string]int64    `json:"source_nonces,omitempty"`
+	Version      int                 `json:"version"`
+	Revision     uint64              `json:"revision"`
+	LastNow      int64               `json:"last_now"`
+	Receipts     map[string]*receipt `json:"receipts"`
 }
 
 func (p *Plugin) nowMillis() int64 {
@@ -123,6 +124,14 @@ func (p *Plugin) mutate(change func(*ledger, int64) (*receipt, error)) (*receipt
 func (s *ledger) valid() bool {
 	if s.Version != 2 || s.Receipts == nil || len(s.Receipts) > maxReceipts || s.Revision == 0 || s.Revision == ^uint64(0) || s.LastNow <= 0 {
 		return false
+	}
+	if len(s.SourceNonces) > 128 {
+		return false
+	}
+	for nonce, expiry := range s.SourceNonces {
+		if !validReceiptID(nonce) || expiry <= 0 {
+			return false
+		}
 	}
 	for id, r := range s.Receipts {
 		if r != nil && r.Journal != nil && !r.Journal.valid() {
